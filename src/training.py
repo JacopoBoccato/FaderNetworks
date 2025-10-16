@@ -1,31 +1,29 @@
 # Copyright (c) 2017-present, Facebook, Inc.
 # All rights reserved.
 #
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
-#
+# Adapted by JacopoBoccato for protein sequences instead of images.
 
 import os
 import numpy as np
 import torch
-from torch.autograd import Variable
 from torch.nn import functional as F
 from logging import getLogger
 
 from .utils import get_optimizer, clip_grad_norm, get_lambda, reload_model
 from .model import get_attr_loss, flip_attributes
 
-
 logger = getLogger()
 
 
 class Trainer(object):
+    """
+    Trainer for the sequence‑based Fader autoencoder.
+    Handles the autoencoder, latent discriminator, optional patch/classifier discriminators.
+    Uses DataSampler.next_batch() (not train_batch) to fetch mini‑batches.
+    """
 
     def __init__(self, ae, lat_dis, ptc_dis, clf_dis, data, params):
-        """
-        Trainer initialization.
-        """
-        # data / parameters
+        # dataset / hyper‑params
         self.data = data
         self.params = params
 
@@ -38,123 +36,146 @@ class Trainer(object):
         # optimizers
         self.ae_optimizer = get_optimizer(ae, params.ae_optimizer)
         logger.info(ae)
-        logger.info('%i parameters in the autoencoder. '
-                    % sum([p.nelement() for p in ae.parameters()]))
+        logger.info('%i parameters in the autoencoder.' %
+                    sum(p.nelement() for p in ae.parameters()))
         if params.n_lat_dis:
             logger.info(lat_dis)
-            logger.info('%i parameters in the latent discriminator. '
-                        % sum([p.nelement() for p in lat_dis.parameters()]))
+            logger.info('%i parameters in the latent discriminator.' %
+                        sum(p.nelement() for p in lat_dis.parameters()))
             self.lat_dis_optimizer = get_optimizer(lat_dis, params.dis_optimizer)
         if params.n_ptc_dis:
             logger.info(ptc_dis)
-            logger.info('%i parameters in the patch discriminator. '
-                        % sum([p.nelement() for p in ptc_dis.parameters()]))
+            logger.info('%i parameters in the patch discriminator.' %
+                        sum(p.nelement() for p in ptc_dis.parameters()))
             self.ptc_dis_optimizer = get_optimizer(ptc_dis, params.dis_optimizer)
         if params.n_clf_dis:
             logger.info(clf_dis)
-            logger.info('%i parameters in the classifier discriminator. '
-                        % sum([p.nelement() for p in clf_dis.parameters()]))
+            logger.info('%i parameters in the classifier discriminator.' %
+                        sum(p.nelement() for p in clf_dis.parameters()))
             self.clf_dis_optimizer = get_optimizer(clf_dis, params.dis_optimizer)
 
-        # reload pretrained models
+        # reload pretrained models (use sequence‑specific keys)
         if params.ae_reload:
             reload_model(ae, params.ae_reload,
-                         ['img_sz', 'img_fm', 'init_fm', 'n_layers', 'n_skip', 'attr', 'n_attr'])
+                         ['seq_len', 'n_amino', 'init_fm', 'n_layers',
+                          'n_skip', 'attr', 'n_attr'])
         if params.lat_dis_reload:
             reload_model(lat_dis, params.lat_dis_reload,
-                         ['enc_dim', 'attr', 'n_attr'])
+                         ['seq_len', 'n_amino', 'init_fm', 'max_fm',
+                          'n_layers', 'n_skip', 'hid_dim', 'n_attr'])
         if params.ptc_dis_reload:
             reload_model(ptc_dis, params.ptc_dis_reload,
-                         ['img_sz', 'img_fm', 'init_fm', 'max_fm', 'n_patch_dis_layers'])
+                         ['seq_len', 'n_amino', 'init_fm', 'max_fm'])
         if params.clf_dis_reload:
             reload_model(clf_dis, params.clf_dis_reload,
-                         ['img_sz', 'img_fm', 'init_fm', 'max_fm', 'hid_dim', 'attr', 'n_attr'])
+                         ['seq_len', 'n_amino', 'init_fm', 'max_fm',
+                          'hid_dim', 'attr', 'n_attr'])
 
-        # training statistics
-        self.stats = {}
-        self.stats['rec_costs'] = []
-        self.stats['lat_dis_costs'] = []
-        self.stats['ptc_dis_costs'] = []
-        self.stats['clf_dis_costs'] = []
-
-        # best reconstruction loss / best accuracy
+        # statistics
+        self.stats = {
+            'rec_costs': [],
+            'lat_dis_costs': [],
+            'ptc_dis_costs': [],
+            'clf_dis_costs': []
+        }
+        # best metrics
         self.best_loss = 1e12
         self.best_accu = -1e12
         self.params.n_total_iter = 0
 
+    # ======= Latent discriminator training =======
     def lat_dis_step(self):
-        """
-        Train the latent discriminator.
-        """
+        """Train latent discriminator for one batch."""
         data = self.data
         params = self.params
         self.ae.eval()
+        if not params.n_lat_dis:
+            return
         self.lat_dis.train()
-        bs = params.batch_size
-        # batch / encode / discriminate
-        batch_x, batch_y = data.train_batch(bs)
-        enc_outputs = self.ae.encode(Variable(batch_x.data, volatile=True))
-        preds = self.lat_dis(Variable(enc_outputs[-1 - params.n_skip].data))
-        # loss / optimize
-        loss = get_attr_loss(preds, batch_y, False, params)
-        self.stats['lat_dis_costs'].append(loss.data[0])
+
+        # fetch batch
+        batch_x, batch_y = data.next_batch()
+
+        # encode with no grad through AE (frozen)
+        with torch.no_grad():
+            enc_outputs = self.ae.encode(batch_x)
+            z = enc_outputs[-1 - params.n_skip]   # latent features
+
+        preds = self.lat_dis(z)
+
+        # compute discriminator loss on true labels
+        loss = get_attr_loss(preds, batch_y, flip=False, params=params)
+        self.stats['lat_dis_costs'].append(loss.item())
+
+        # optimize
         self.lat_dis_optimizer.zero_grad()
         loss.backward()
         if params.clip_grad_norm:
             clip_grad_norm(self.lat_dis.parameters(), params.clip_grad_norm)
         self.lat_dis_optimizer.step()
 
+    # ======= Patch discriminator training =======
     def ptc_dis_step(self):
-        """
-        Train the patch discriminator.
-        """
+        """Train patch discriminator (1‑D) for one batch."""
         data = self.data
         params = self.params
+        if not params.n_ptc_dis:
+            return
         self.ae.eval()
         self.ptc_dis.train()
-        bs = params.batch_size
-        # batch / encode / discriminate
-        batch_x, batch_y = data.train_batch(bs)
+
+        batch_x, batch_y = data.next_batch()
+        # flip attributes and decode
         flipped = flip_attributes(batch_y, params, 'all')
-        _, dec_outputs = self.ae(Variable(batch_x.data, volatile=True), flipped)
+        with torch.no_grad():
+            _, dec_outputs = self.ae(batch_x, flipped)
+
         real_preds = self.ptc_dis(batch_x)
-        fake_preds = self.ptc_dis(Variable(dec_outputs[-1].data))
-        y_fake = Variable(torch.FloatTensor(real_preds.size())
-                               .fill_(params.smooth_label).cuda())
-        # loss / optimize
+        fake_preds = self.ptc_dis(dec_outputs[-1])
+
+        y_fake = torch.full_like(real_preds, params.smooth_label)
+        if params.cuda:
+            y_fake = y_fake.cuda()
+
+        # binary cross‑entropy (real vs fake)
         loss = F.binary_cross_entropy(real_preds, 1 - y_fake)
         loss += F.binary_cross_entropy(fake_preds, y_fake)
-        self.stats['ptc_dis_costs'].append(loss.data[0])
+        self.stats['ptc_dis_costs'].append(loss.item())
+
         self.ptc_dis_optimizer.zero_grad()
         loss.backward()
         if params.clip_grad_norm:
             clip_grad_norm(self.ptc_dis.parameters(), params.clip_grad_norm)
         self.ptc_dis_optimizer.step()
 
+    # ======= Classifier discriminator training =======
     def clf_dis_step(self):
-        """
-        Train the classifier discriminator.
-        """
+        """Train classifier discriminator for one batch."""
         data = self.data
         params = self.params
+        if not params.n_clf_dis:
+            return
         self.clf_dis.train()
-        bs = params.batch_size
-        # batch / predict
-        batch_x, batch_y = data.train_batch(bs)
+
+        batch_x, batch_y = data.next_batch()
         preds = self.clf_dis(batch_x)
-        # loss / optimize
-        loss = get_attr_loss(preds, batch_y, False, params)
-        self.stats['clf_dis_costs'].append(loss.data[0])
+
+        loss = get_attr_loss(preds, batch_y, flip=False, params=params)
+        self.stats['clf_dis_costs'].append(loss.item())
+
         self.clf_dis_optimizer.zero_grad()
         loss.backward()
         if params.clip_grad_norm:
             clip_grad_norm(self.clf_dis.parameters(), params.clip_grad_norm)
         self.clf_dis_optimizer.step()
 
+    # ======= Autoencoder + adversarial step =======
     def autoencoder_step(self):
         """
-        Train the autoencoder with cross-entropy loss.
-        Train the encoder with discriminator loss.
+        Train the autoencoder with reconstruction + adversarial terms.
+        - Reconstruction: MSE between input and output one‑hot sequences.
+        - Latent adversarial: fool latent discriminator.
+        - Optional patch/classifier discriminator feedback on decoded sequences with flipped labels.
         """
         data = self.data
         params = self.params
@@ -165,50 +186,59 @@ class Trainer(object):
             self.ptc_dis.eval()
         if params.n_clf_dis:
             self.clf_dis.eval()
-        bs = params.batch_size
-        # batch / encode / decode
-        batch_x, batch_y = data.train_batch(bs)
+
+        batch_x, batch_y = data.next_batch()
+
+        # forward pass through autoencoder
         enc_outputs, dec_outputs = self.ae(batch_x, batch_y)
-        # autoencoder loss from reconstruction
-        loss = params.lambda_ae * ((batch_x - dec_outputs[-1]) ** 2).mean()
-        self.stats['rec_costs'].append(loss.data[0])
-        # encoder loss from the latent discriminator
+        recon = dec_outputs[-1]
+
+        # reconstruction loss (MSE on one‑hot)
+        rec_loss = ((batch_x - recon) ** 2).mean()
+        loss = params.lambda_ae * rec_loss
+        self.stats['rec_costs'].append(rec_loss.item())
+
+        # latent adversarial loss (encoder tries to fool discriminator)
         if params.lambda_lat_dis:
             lat_dis_preds = self.lat_dis(enc_outputs[-1 - params.n_skip])
-            lat_dis_loss = get_attr_loss(lat_dis_preds, batch_y, True, params)
+            lat_dis_loss = get_attr_loss(lat_dis_preds, batch_y, flip=True, params=params)
             loss = loss + get_lambda(params.lambda_lat_dis, params) * lat_dis_loss
-        # decoding with random labels
+
+        # decode with random attributes for patch/classifier discriminators
         if params.lambda_ptc_dis + params.lambda_clf_dis > 0:
             flipped = flip_attributes(batch_y, params, 'all')
             dec_outputs_flipped = self.ae.decode(enc_outputs, flipped)
-        # autoencoder loss from the patch discriminator
+
+        # patch discriminator loss for AE (if enabled)
         if params.lambda_ptc_dis:
             ptc_dis_preds = self.ptc_dis(dec_outputs_flipped[-1])
-            y_fake = Variable(torch.FloatTensor(ptc_dis_preds.size())
-                                   .fill_(params.smooth_label).cuda())
+            y_fake = torch.full_like(ptc_dis_preds, params.smooth_label)
+            if params.cuda:
+                y_fake = y_fake.cuda()
             ptc_dis_loss = F.binary_cross_entropy(ptc_dis_preds, 1 - y_fake)
             loss = loss + get_lambda(params.lambda_ptc_dis, params) * ptc_dis_loss
-        # autoencoder loss from the classifier discriminator
+
+        # classifier discriminator loss for AE (if enabled)
         if params.lambda_clf_dis:
             clf_dis_preds = self.clf_dis(dec_outputs_flipped[-1])
-            clf_dis_loss = get_attr_loss(clf_dis_preds, flipped, False, params)
+            clf_dis_loss = get_attr_loss(clf_dis_preds, flipped, flip=False, params=params)
             loss = loss + get_lambda(params.lambda_clf_dis, params) * clf_dis_loss
-        # check NaN
-        if (loss != loss).data.any():
-            logger.error("NaN detected")
+
+        # safety check: detect NaNs
+        if torch.isnan(loss):
+            logger.error("NaN detected in loss; aborting.")
             exit()
-        # optimize
+
+        # optimize AE
         self.ae_optimizer.zero_grad()
         loss.backward()
         if params.clip_grad_norm:
             clip_grad_norm(self.ae.parameters(), params.clip_grad_norm)
         self.ae_optimizer.step()
 
+    # ======= Logging step =======
     def step(self, n_iter):
-        """
-        End training iteration / print training statistics.
-        """
-        # average loss
+        """Aggregate and print running statistics every 25 iterations."""
         if len(self.stats['rec_costs']) >= 25:
             mean_loss = [
                 ('Latent discriminator', 'lat_dis_costs'),
@@ -217,23 +247,25 @@ class Trainer(object):
                 ('Reconstruction loss', 'rec_costs'),
             ]
             logger.info(('%06i - ' % n_iter) +
-                        ' / '.join(['%s : %.5f' % (a, np.mean(self.stats[b]))
-                                    for a, b in mean_loss if len(self.stats[b]) > 0]))
-            del self.stats['rec_costs'][:]
-            del self.stats['lat_dis_costs'][:]
-            del self.stats['ptc_dis_costs'][:]
-            del self.stats['clf_dis_costs'][:]
+                        ' / '.join('%s : %.5f' %
+                                    (name, np.mean(self.stats[key]))
+                                    for name, key in mean_loss
+                                    if self.stats[key]))
+            # reset running stats
+            for key in self.stats:
+                self.stats[key].clear()
 
         self.params.n_total_iter += 1
 
+    # ======= Model saving =======
     def save_model(self, name):
-        """
-        Save the model.
-        """
-        def save(model, filename):
-            path = os.path.join(self.params.dump_path, '%s_%s.pth' % (name, filename))
-            logger.info('Saving %s to %s ...' % (filename, path))
-            torch.save(model, path)
+        """Save the autoencoder and discriminators."""
+        def save(module, tag):
+            path = os.path.join(self.params.dump_path,
+                                f'{name}_{tag}.pth')
+            logger.info('Saving %s to %s ...' % (tag, path))
+            torch.save(module, path)
+
         save(self.ae, 'ae')
         if self.params.n_lat_dis:
             save(self.lat_dis, 'lat_dis')
@@ -243,9 +275,7 @@ class Trainer(object):
             save(self.clf_dis, 'clf_dis')
 
     def save_best_periodic(self, to_log):
-        """
-        Save the best models / periodically save the models.
-        """
+        """Save the best models and periodic checkpoints."""
         if to_log['ae_loss'] < self.best_loss:
             self.best_loss = to_log['ae_loss']
             logger.info('Best reconstruction loss: %.5f' % self.best_loss)
@@ -255,22 +285,18 @@ class Trainer(object):
             logger.info('Best evaluation accuracy: %.5f' % self.best_accu)
             self.save_model('best_accu')
         if to_log['n_epoch'] % 5 == 0 and to_log['n_epoch'] > 0:
-            self.save_model('periodic-%i' % to_log['n_epoch'])
+            self.save_model(f'periodic-{to_log["n_epoch"]}')
 
 
+# ======= Standalone classifier training =======
 def classifier_step(classifier, optimizer, data, params, costs):
-    """
-    Train the classifier.
-    """
+    """Train an external classifier on sequence data."""
     classifier.train()
     bs = params.batch_size
-
-    # batch / classify
-    batch_x, batch_y = data.train_batch(bs)
+    batch_x, batch_y = data.next_batch()
     preds = classifier(batch_x)
-    # loss / optimize
-    loss = get_attr_loss(preds, batch_y, False, params)
-    costs.append(loss.data[0])
+    loss = get_attr_loss(preds, batch_y, flip=False, params=params)
+    costs.append(loss.item())
     optimizer.zero_grad()
     loss.backward()
     if params.clip_grad_norm:

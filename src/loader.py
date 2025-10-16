@@ -5,6 +5,9 @@ from logging import getLogger
 from typing import List
 
 logger = getLogger()
+##########################DUMMY TO REMOVE##########################
+AVAILABLE_ATTR = ["BinaryAttr"] 
+
 
 # ============================================================
 # Alphabet definitions
