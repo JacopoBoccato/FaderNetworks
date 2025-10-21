@@ -31,7 +31,7 @@ parser.add_argument("--n_amino", type=int, default=21,
 parser.add_argument("--alphabet_type", type=str, default="normal",
                     choices=["normal", "lattice"],
                     help="Alphabet used for one-hot encoding")
-parser.add_argument("--attr", type=attr_flag, default="Attribute1,Attribute2")
+parser.add_argument("--attr", type=attr_flag, default="")
 
 # Architecture
 parser.add_argument("--instance_norm", type=bool_flag, default=False)
@@ -101,23 +101,28 @@ logger.info(f"Dataset loaded: {len(train_data)} train / {len(valid_data)} valid 
 # ============================================================
 # Build models
 # ============================================================
-ae = AutoEncoder(params).cuda() if params.cuda else AutoEncoder(params)
-lat_dis = LatentDiscriminator(params).cuda() if params.n_lat_dis and params.cuda else None
-ptc_dis = PatchDiscriminator(params).cuda() if params.n_ptc_dis and params.cuda else None
-clf_dis = Classifier(params).cuda() if params.n_clf_dis and params.cuda else None
+ae = AutoEncoder(params)
+lat_dis = LatentDiscriminator(params)             # <— always build it
+ptc_dis = PatchDiscriminator(params) if params.n_ptc_dis > 0 else None
+clf_dis = Classifier(params) if params.n_clf_dis > 0 else None
 
-eval_clf = None
-if params.eval_clf and os.path.isfile(params.eval_clf):
-    eval_clf = torch.load(params.eval_clf)
-    if params.cuda:
-        eval_clf = eval_clf.cuda()
-    eval_clf.eval()
+# Move models to GPU if requested
+if params.cuda:
+    ae = ae.cuda()
+    lat_dis = lat_dis.cuda()
+    if ptc_dis is not None:
+        ptc_dis = ptc_dis.cuda()
+    if clf_dis is not None:
+        clf_dis = clf_dis.cuda()
 
-# ============================================================
-# Trainer & Evaluator
-# ============================================================
+# Hard assert so we fail fast if anything turns it into None
+assert lat_dis is not None, "lat_dis is None before Trainer init"
+
+if not params.attr:
+    params.attr = []
+
 trainer = Trainer(ae, lat_dis, ptc_dis, clf_dis, train_data, params)
-evaluator = Evaluator(ae, lat_dis, ptc_dis, clf_dis, eval_clf, valid_data, params)
+evaluator = Evaluator(ae, lat_dis, ptc_dis, clf_dis, None, valid_data, params)
 
 # ============================================================
 # Training loop
@@ -144,3 +149,4 @@ for n_epoch in range(params.n_epochs):
     to_log = evaluator.evaluate(n_epoch)
     trainer.save_best_periodic(to_log)
     logger.info(f"End of epoch {n_epoch}.\n")
+

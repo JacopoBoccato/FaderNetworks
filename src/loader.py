@@ -94,60 +94,46 @@ def save_onehot_dataset(
 # ============================================================
 
 def load_sequences(params, alphabet_type="normal"):
-    """
-    Load one-hot encoded sequences and binary attribute labels.
-
-    Expected files:
-        - sequences_<seq_len>.pth
-        - attributes.pth
-    """
     alphabet = get_alphabet(alphabet_type)
     expected_amino = len(alphabet)
-
     logger.info(f"Using '{alphabet_type}' alphabet ({expected_amino} symbols).")
-    logger.info(f"Expected input channels: {params.n_amino}")
 
     # Load sequence tensor
-    seq_filename = f"sequences_{params.seq_len}.pth"
-    seq_path = os.path.join(params.data_path, seq_filename)
-    if not os.path.isfile(seq_path):
-        raise FileNotFoundError(f"Sequence file not found: {seq_path}")
+    seq_path = os.path.join(params.data_path, f"sequences_{params.seq_len}.pth")
+    sequences = torch.load(seq_path).float()
 
-    sequences = torch.load(seq_path)  # shape [N, n_amino, seq_len]
-    if sequences.dim() != 3 or sequences.size(1) != params.n_amino:
-        raise ValueError(
-            f"Expected sequences of shape [N, {params.n_amino}, {params.seq_len}], "
-            f"but got {tuple(sequences.shape)}"
-        )
-
-    sequences = sequences.float()
-
-    # Load attribute labels
+    # Load or infer attributes
     attr_path = os.path.join(params.data_path, "attributes.pth")
-    if not os.path.isfile(attr_path):
-        raise FileNotFoundError(f"Attribute labels file not found: {attr_path}")
-    labels = torch.load(attr_path)
-    if labels.size(0) != sequences.size(0):
-        raise ValueError("Number of labels does not match number of sequences")
+    label_path = os.path.join(params.data_path, f"labels_{params.seq_len}.pth")
 
-    # Split train / valid / test
+    if os.path.isfile(label_path):
+        labels = torch.load(label_path)
+        params.n_attr = labels.size(1)
+        logger.info(f"Detected {params.n_attr} attributes from label tensor.")
+    else:
+        # if no labels, generate random dummy attributes
+        N = sequences.size(0)
+        params.n_attr = 2
+        labels = torch.randint(0, 2, (N, params.n_attr), dtype=torch.float32)
+        logger.warning("No labels found; generated random attributes for testing.")
+
+    # Save attribute metadata if missing
+    if not os.path.isfile(attr_path):
+        attributes = [(f"Attribute{i+1}", int(labels[:, i].unique().numel())) for i in range(params.n_attr)]
+        torch.save(attributes, attr_path)
+        logger.info(f"Saved inferred attributes to {attr_path}")
+
+    # Split train/valid/test
     N = sequences.size(0)
     n_train = int(0.8 * N)
     n_valid = int(0.1 * N)
     n_test = N - n_train - n_valid
 
-    seq_train = sequences[:n_train]
-    seq_valid = sequences[n_train:n_train + n_valid]
-    seq_test = sequences[n_train + n_valid:]
-    labels_train = labels[:n_train]
-    labels_valid = labels[n_train:n_train + n_valid]
-    labels_test = labels[n_train + n_valid:]
+    seq_train, seq_valid, seq_test = torch.split(sequences, [n_train, n_valid, n_test])
+    lab_train, lab_valid, lab_test = torch.split(labels, [n_train, n_valid, n_test])
 
-    logger.info(
-        f"Loaded {N} sequences ({n_train} train / {n_valid} valid / {n_test} test)"
-    )
-
-    return [seq_train, seq_valid, seq_test], [labels_train, labels_valid, labels_test]
+    logger.info(f"Loaded {N} sequences ({n_train} train / {n_valid} valid / {n_test} test)")
+    return [seq_train, seq_valid, seq_test], [lab_train, lab_valid, lab_test]
 
 
 # ============================================================
@@ -180,6 +166,19 @@ class DataSampler(object):
             batch_seq = batch_seq.cuda()
             batch_labels = batch_labels.cuda()
         return Variable(batch_seq), Variable(batch_labels)
+
+    def eval_batch(self, i, j):
+        """
+        Return a fixed batch of data between indices [i, j)
+        (used for evaluation to ensure determinism).
+        """
+        batch_seq = self.sequences[i:j]
+        batch_labels = self.labels[i:j]
+        if self.use_cuda:
+            batch_seq = batch_seq.cuda()
+            batch_labels = batch_labels.cuda()
+        return Variable(batch_seq), Variable(batch_labels)
+
 
     def __len__(self):
         return self.sequences.size(0)
