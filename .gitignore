@@ -104,3 +104,27 @@ venv.bak/
 .mypy_cache/
 
 # End of https://www.gitignore.io/api/python
+
+# Dati
+data/
+*.npy
+*.npz
+
+# Modelli pesanti
+models/
+*.pth
+*.pkl
+*.pt
+
+# Output temporanei
+*.log
+*.tmp
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# File vari
+*.swp
+

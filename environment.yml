@@ -1,0 +1,16 @@
+name: fader_env
+channels:
+  - defaults
+  - pytorch
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - matplotlib
+  - tqdm
+  - pip:
+      # CPU-only PyTorch build; replace with GPU wheel if needed
+      - torch
+      - torchvision
+      - torchaudio
+

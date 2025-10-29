@@ -16,8 +16,8 @@ AVAILABLE_ATTR = ["BinaryAttr"]
 # Normal alphabet: 20 amino acids + '-' padding
 ALPHABET_NORMAL = list("ACDEFGHIKLMNPQRSTVWY-")
 
-# Lattice alphabet: ordered by hydrophobicity + '-' padding
-ALPHABET_LATTICE = list("CMFILVWYAGTSNQDEHRKP-")
+# Lattice alphabet
+ALPHABET_LATTICE = list("CMFILVWYAGTSNQDEHRKP")
 
 def get_alphabet(alphabet_type: str):
     """Return symbol list for the chosen alphabet."""

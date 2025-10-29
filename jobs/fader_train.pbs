@@ -1,0 +1,41 @@
+#!/bin/bash
+#--------------------------------------------------
+# PBS directives
+#--------------------------------------------------
+
+# Job name
+#PBS -N Fader
+
+# Output and error files
+#PBS -o Fader_output.log
+#PBS -e Fader_error.log
+
+# Email notifications
+#PBS -m a
+#PBS -M jacopo.boccato@gmail.com
+
+# Resources
+#PBS -l select=1:ncpus=20
+
+#--------------------------------------------------
+# Job environment setup
+#--------------------------------------------------
+
+# Go to the repository root (one level above jobs/)
+cd "$PBS_O_WORKDIR/.."
+
+# Load environment
+module purge
+# module load cuda/12.2   # (keep commented since no GPU)
+# Load conda directly
+source /home/ipht/jboccato/miniconda/etc/profile.d/conda.sh
+conda activate fader_env
+
+# Optional: create logs directory (in repo)
+mkdir -p logs
+
+#--------------------------------------------------
+# Run training
+#--------------------------------------------------
+bash scripts/train_lattice_fader.sh
+

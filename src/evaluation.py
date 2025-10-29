@@ -8,7 +8,7 @@ import json
 import numpy as np
 from logging import getLogger
 
-from .model import update_predictions, flip_attributes
+from .model import update_predictions, flip_attributes, sequence_cross_entropy
 from .utils import print_accuracies
 
 logger = getLogger()
@@ -42,20 +42,25 @@ class Evaluator(object):
     #  Reconstruction loss
     # -------------------------------------------------------
     def eval_reconstruction_loss(self):
-        """Compute mean squared reconstruction loss."""
         data = self.data
         params = self.params
         self.ae.eval()
         bs = params.batch_size
 
-        costs = []
+        total_loss = 0.0
+        total_tokens = 0
         for i in range(0, len(data), bs):
             batch_x, batch_y = data.eval_batch(i, i + bs)
             _, dec_outputs = self.ae(batch_x, batch_y)
-            loss = ((dec_outputs[-1] - batch_x) ** 2).mean().item()
-            costs.append(loss)
+            x_hat = dec_outputs[-1]
+            # same CE as in training (per-token mean)
+            B, V, T = x_hat.shape
+            ce = sequence_cross_entropy(x_hat, batch_x)      # per-token mean
+            total_loss += ce.item() * (B * T)
+            total_tokens += B * T
 
-        return np.mean(costs)
+        return total_loss / max(1, total_tokens)
+
 
     # -------------------------------------------------------
     #  Latent discriminator accuracy
@@ -72,7 +77,7 @@ class Evaluator(object):
         for i in range(0, len(data), bs):
             batch_x, batch_y = data.eval_batch(i, i + bs)
             enc_outputs = self.ae.encode(batch_x)
-            preds = self.lat_dis(enc_outputs[-1 - params.n_skip]).detach().cpu()
+            preds = self.lat_dis(enc_outputs[-1]).detach().cpu()
             update_predictions(all_preds, preds, batch_y.detach().cpu(), params)
 
         return [np.mean(x) for x in all_preds]
