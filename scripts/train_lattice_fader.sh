@@ -6,19 +6,19 @@ set -euo pipefail
 # ============================================================
 
 # --- Configuration ---
-DATA_DIR="data/lattice/processed"
-EXPNAME="lattice_dense_minimal"
+DATA_DIR="data/lattice_EM/processed"
+EXPNAME="lattice_EM"
 
 # --- Model architecture ---
-ENCODER_DIMS="120,60"
-DECODER_DIMS="120"
+ENCODER_DIMS="50,20"
+DECODER_DIMS="50"
 
 # --- Discriminator and training ---
-DIS_HIDDEN_DIMS="50,10"        # empty = simple perceptron
-LAT_DIS_DROPOUT=0.2
+DIS_HIDDEN_DIMS="15,10,5"        # empty = simple perceptron
+LAT_DIS_DROPOUT=0.1
 LAMBDA_LAT_DIS=1.0
 BATCH_SIZE=64
-EPOCHS=500
+EPOCHS=300
 
 # ============================================================
 # Run training
@@ -36,7 +36,7 @@ python -u train.py \
   --n_lat_dis 1 \
   --n_ptc_dis 0 \
   --n_clf_dis 0 \
-  --lambda_ae 3.0 \
+  --lambda_ae 1.3 \
   --lambda_lat_dis ${LAMBDA_LAT_DIS} \
   --lat_dis_dropout ${LAT_DIS_DROPOUT} \
   --batch_size ${BATCH_SIZE} \

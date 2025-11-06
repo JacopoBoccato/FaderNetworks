@@ -1,7 +1,7 @@
 # Copyright (c) 2017-present, Facebook, Inc.
 # All rights reserved.
 #
-# Adapted for 1D protein sequences by Jacopo Boccato & ChatGPT.
+# Adapted for 1D protein and RNA sequences by Jacopo Boccato & ChatGPT.
 
 import os
 import argparse
@@ -13,23 +13,31 @@ from src.model import AutoEncoder, LatentDiscriminator, PatchDiscriminator, Clas
 from src.training import Trainer
 from src.evaluation import Evaluator
 
+
 # ============================================================
 # Parse parameters
 # ============================================================
-parser = argparse.ArgumentParser(description="Protein sequence autoencoder (dense Fader)")
+parser = argparse.ArgumentParser(description="Sequence autoencoder (dense Fader)")
 
 # Experiment setup
-parser.add_argument("--name", type=str, default="protein_seq_exp")
+parser.add_argument("--name", type=str, default="seq_autoencoder_exp")
 parser.add_argument("--data_path", type=str, default="data")
 
-# Protein sequence configuration
+# Sequence configuration
 parser.add_argument("--seq_len", type=int, required=True,
                     help="Fixed sequence length (padding/truncation applied)")
-parser.add_argument("--n_amino", type=int, default=21,
-                    help="Number of amino acid types (channels)")
-parser.add_argument("--alphabet_type", type=str, default="normal",
-                    choices=["normal", "lattice"],
-                    help="Alphabet used for one-hot encoding")
+
+parser.add_argument(
+    "--alphabet_type",
+    type=str,
+    default="normal",
+    choices=["normal", "lattice", "rna"],
+    help="Alphabet used for one-hot encoding (normal / lattice / rna)"
+)
+
+parser.add_argument("--n_amino", type=int, default=None,
+                    help="Number of alphabet symbols (auto-inferred if None)")
+
 parser.add_argument("--attr", type=attr_flag, default="")
 
 # Flexible dense architecture controls
@@ -39,16 +47,13 @@ parser.add_argument("--decoder_hidden_dims", type=str, default="",
                     help="Comma-separated hidden dimensions for decoder BEFORE the final output dim, e.g. '130,256'")
 
 # Latent + Discriminator
-# NOTE: params.hid_dim will be set by AutoEncoder to the last encoder hidden dim.
 parser.add_argument("--hid_dim", type=int, default=512,
-                    help="(Ignored if encoder_hidden_dims provided) AE sets this to latent dim.")
-parser.add_argument("--lat_dis_dropout", type=float, default=0.0,
-                    help="Dropout in latent discriminator (if implemented in your class)")
+                    help="Latent dim (ignored if encoder_hidden_dims provided).")
+parser.add_argument("--lat_dis_dropout", type=float, default=0.0)
 parser.add_argument("--dis_hidden_dims", type=str, default="",
-                    help="Comma-separated hidden dims for latent discriminator MLP (e.g., '128,64'). "
-                         "Empty -> single Linear(latent_dim -> n_attr).")
+                    help="Comma-separated hidden dims for latent discriminator MLP (e.g., '128,64').")
 
-# Discriminator toggles (defaults = only latent-dis on, others off)
+# Discriminator toggles
 parser.add_argument("--n_lat_dis", type=int, default=1)
 parser.add_argument("--n_ptc_dis", type=int, default=0)
 parser.add_argument("--n_clf_dis", type=int, default=0)
@@ -85,12 +90,12 @@ parser.add_argument("--cuda", type=bool_flag, default=True)
 
 params = parser.parse_args()
 
+
 # ============================================================
-# Device
+# Device setup
 # ============================================================
 if not torch.cuda.is_available():
     params.cuda = False
-
 device = torch.device("cuda" if params.cuda else "cpu")
 
 # ============================================================
@@ -105,18 +110,25 @@ params.decoder_hidden_dims = _parse_dims(params.decoder_hidden_dims)
 params.dis_hidden_dims = _parse_dims(params.dis_hidden_dims)
 
 # ============================================================
-# Sanity checks
+# Sanity checks and alphabet-dependent defaults
 # ============================================================
 check_attr(params)
 assert len(params.name.strip()) > 0, "Experiment name cannot be empty."
-assert (params.lambda_lat_dis == 0.0) or (params.n_lat_dis > 0), \
-    "lambda_lat_dis > 0 requires n_lat_dis > 0"
-assert (params.lambda_ptc_dis == 0.0) or (params.n_ptc_dis > 0), \
-    "lambda_ptc_dis > 0 requires n_ptc_dis > 0"
-assert (params.lambda_clf_dis == 0.0) or (params.n_clf_dis > 0), \
-    "lambda_clf_dis > 0 requires n_clf_dis > 0"
 
-# If no attributes were passed, keep a consistent empty list
+if params.n_amino is None:
+    if params.alphabet_type == "normal":
+        params.n_amino = 21
+    elif params.alphabet_type == "lattice":
+        params.n_amino = 20
+    elif params.alphabet_type == "rna":
+        params.n_amino = 5  # A,C,G,U, and '-'
+    else:
+        raise ValueError(f"Invalid alphabet_type: {params.alphabet_type}")
+
+assert (params.lambda_lat_dis == 0.0) or (params.n_lat_dis > 0)
+assert (params.lambda_ptc_dis == 0.0) or (params.n_ptc_dis > 0)
+assert (params.lambda_clf_dis == 0.0) or (params.n_clf_dis > 0)
+
 if not params.attr:
     params.attr = []
 
@@ -125,7 +137,7 @@ if not params.attr:
 # ============================================================
 logger = initialize_exp(params)
 
-logger.info(f"Loading dataset using '{params.alphabet_type}' alphabet ...")
+logger.info(f"Loading dataset using '{params.alphabet_type}' alphabet ({params.n_amino} symbols)...")
 data, labels = load_sequences(params, alphabet_type=params.alphabet_type)
 train_data = DataSampler(data[0], labels[0], params)
 valid_data = DataSampler(data[1], labels[1], params)

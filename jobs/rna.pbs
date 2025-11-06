@@ -1,0 +1,52 @@
+#!/bin/bash
+# ============================================================
+# PBS job script for running multiple Fader experiments in parallel
+# ============================================================
+
+# ------------------ Job Info ------------------
+# Job name
+#PBS -N Fader
+# These will appear in the directory where you run qsub
+#PBS -o Fader_output.log
+#PBS -e Fader_error.log
+
+# Email notifications (optional)
+#PBS -m a
+#PBS -M jacopo.boccato@gmail.com
+
+# Resource request: 1 node, 20 CPUs, no GPUs
+# Adjust walltime as needed
+#PBS -l select=1:ncpus=20
+
+# Merge stdout/stderr and export current environment
+#PBS -j oe
+#PBS -V
+
+# ------------------ Job Setup ------------------
+# Move to repository root (assuming this .pbs is in jobs/)
+cd "$PBS_O_WORKDIR/.."
+
+# Clean environment and load conda
+module purge
+# module load cuda/12.2   # Uncomment if using GPU
+source /home/ipht/jboccato/miniconda/etc/profile.d/conda.sh
+conda activate fader_env
+
+# Ensure log directories exist
+mkdir -p logs
+
+echo "============================================================"
+echo " Fader Network Parallel Training Job"
+echo " Working directory: $(pwd)"
+echo " Running on host: $(hostname)"
+echo " CPUs allocated: ${PBS_NCPUS:-unknown}"
+echo " Job started at: $(date)"
+echo "============================================================"
+
+# ------------------ Launch Training ------------------
+bash scripts/Fader_rna.sh
+
+echo "============================================================"
+echo " Job finished at: $(date)"
+echo "============================================================"
+

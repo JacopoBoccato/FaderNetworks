@@ -12,7 +12,7 @@ from src.model import AutoEncoder, sequence_cross_entropy
 # ------------------------------------------------------------
 # 1. User paths
 # ------------------------------------------------------------
-run_dir = "/home/ipht/jboccato/FADER_TEST/FaderNetworks/models/lattice_dense_minimal/gor8crk124"          # directory with params.pkl and model weights
+run_dir = "/home/ipht/jboccato/FADER_TEST/FaderNetworks/models/lattice_dense_minimal/lb05np9jzr"          # directory with params.pkl and model weights
 data_path = "/home/ipht/jboccato/FADER_TEST/FaderNetworks/data/lattice/processed/sequences_27.pth"  # <-- your .pth file with input data
 
 device = "cuda" if torch.cuda.is_available() else "cpu"

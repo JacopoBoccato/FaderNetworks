@@ -16,8 +16,11 @@ AVAILABLE_ATTR = ["BinaryAttr"]
 # Normal alphabet: 20 amino acids + '-' padding
 ALPHABET_NORMAL = list("ACDEFGHIKLMNPQRSTVWY-")
 
-# Lattice alphabet
+# Lattice alphabet (used for coarse-grained representations)
 ALPHABET_LATTICE = list("CMFILVWYAGTSNQDEHRKP")
+
+# RNA alphabet: A, C, G, U + optional '-' padding
+ALPHABET_RNA = list("ACGU-")
 
 def get_alphabet(alphabet_type: str):
     """Return symbol list for the chosen alphabet."""
@@ -25,8 +28,11 @@ def get_alphabet(alphabet_type: str):
         return ALPHABET_NORMAL
     elif alphabet_type == "lattice":
         return ALPHABET_LATTICE
+    elif alphabet_type == "rna":
+        return ALPHABET_RNA
     else:
-        raise ValueError(f"Unknown alphabet_type: {alphabet_type}")
+        raise ValueError(f"Unknown alphabet_type: {alphabet_type}. "
+                         "Valid types: 'normal', 'lattice', 'rna'.")
 
 
 # ============================================================
@@ -40,54 +46,42 @@ def onehot_encode_sequences(
     pad_token: str = "-",
 ):
     """
-    Convert a list of sequences into one-hot encoded tensors.
+    Convert a list of sequences (protein, lattice, or RNA) into one-hot encoded tensors.
 
     Args:
-        sequences: list of strings (protein or lattice sequences)
-        alphabet_type: 'normal' or 'lattice'
+        sequences: list of strings
+        alphabet_type: 'normal', 'lattice', or 'rna'
         seq_len: fixed length to pad/truncate all sequences
         pad_token: padding symbol ('-')
 
     Returns:
-        encoded: Tensor [N, n_amino, seq_len]
+        encoded: Tensor [N, n_symbols, seq_len]
         alphabet: list of symbols used
     """
     alphabet = get_alphabet(alphabet_type)
-    n_amino = len(alphabet)
+    n_sym = len(alphabet)
     symbol_to_idx = {sym: i for i, sym in enumerate(alphabet)}
+
+    # Normalize RNA sequences (replace T→U)
+    if alphabet_type == "rna":
+        sequences = [s.upper().replace("T", "U") for s in sequences]
 
     if seq_len is None:
         seq_len = max(len(s) for s in sequences)
 
-    encoded = torch.zeros((len(sequences), n_amino, seq_len), dtype=torch.float32)
+    encoded = torch.zeros((len(sequences), n_sym, seq_len), dtype=torch.float32)
 
     for n, seq in enumerate(sequences):
+        seq = seq.upper()
         for pos, char in enumerate(seq[:seq_len]):
-            idx = symbol_to_idx.get(char, symbol_to_idx.get(pad_token, n_amino - 1))
+            # unknown characters get encoded as pad token
+            idx = symbol_to_idx.get(char, symbol_to_idx.get(pad_token, n_sym - 1))
             encoded[n, idx, pos] = 1.0
         if len(seq) < seq_len:
-            pad_idx = symbol_to_idx.get(pad_token, n_amino - 1)
+            pad_idx = symbol_to_idx.get(pad_token, n_sym - 1)
             encoded[n, pad_idx, len(seq):] = 1.0
 
     return encoded, alphabet
-
-
-def save_onehot_dataset(
-    sequences: List[str],
-    output_path: str,
-    alphabet_type: str = "normal",
-    seq_len: int = None,
-):
-    """
-    One-hot encode sequences and save them as a .pth tensor.
-
-    Example:
-        save_onehot_dataset(seqs, "data/sequences_256.pth", alphabet_type="normal")
-    """
-    onehot_tensor, alphabet = onehot_encode_sequences(sequences, alphabet_type, seq_len)
-    torch.save(onehot_tensor, output_path)
-    print(f"✅ Saved one-hot dataset to {output_path} with shape {tuple(onehot_tensor.shape)}")
-
 
 # ============================================================
 # Sequence loading

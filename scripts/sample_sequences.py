@@ -72,7 +72,7 @@ def cross_entropy_per_sequence(pred, target):
 
 def main():
     # === Config ===
-    run_dir = "models/lattice_dense_minimal/ijfu5kcvop"   # <-- adjust to your folder
+    run_dir = "models/lattice_dense_minimal/7sp489j47r"   # <-- adjust to your folder
     model_path = Path(run_dir) / "best_rec_ae.pth"
     data_dir = Path("data/lattice")
     out_path = Path(run_dir) / "validation_results.txt"
