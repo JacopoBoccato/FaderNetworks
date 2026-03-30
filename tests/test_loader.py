@@ -31,6 +31,7 @@ class Params:
     batch_size = 2
     data_path = "data"
     cuda = False
+    label_type = "binary"
 
 from src.loader import load_sequences, DataSampler
 

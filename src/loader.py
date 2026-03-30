@@ -83,18 +83,43 @@ def onehot_encode_sequences(
 
     return encoded, alphabet
 
+
+def save_onehot_dataset(sequences, path, alphabet_type='normal', seq_len=None):
+    """Encode sequences as one-hot and save to file path."""
+    encoded, _ = onehot_encode_sequences(sequences, alphabet_type=alphabet_type, seq_len=seq_len)
+    dirname = os.path.dirname(path)
+    if dirname and not os.path.exists(dirname):
+        os.makedirs(dirname, exist_ok=True)
+    torch.save(encoded, path)
+    return encoded
+
 # ============================================================
 # Sequence loading
 # ============================================================
 
-def load_sequences(params, alphabet_type="normal"):
+def load_sequences(params, alphabet_type="normal", x_type="onehot"):
     alphabet = get_alphabet(alphabet_type)
     expected_amino = len(alphabet)
-    logger.info(f"Using '{alphabet_type}' alphabet ({expected_amino} symbols).")
+    logger.info(f"Using '{alphabet_type}' alphabet ({expected_amino} symbols). x_type={x_type}")
 
     # Load sequence tensor
     seq_path = os.path.join(params.data_path, f"sequences_{params.seq_len}.pth")
-    sequences = torch.load(seq_path).float()
+    sequences = torch.load(seq_path)
+
+    if x_type == 'indices':
+        # sequences expected as [N, T] or [N,1,T]
+        if sequences.dim() == 3 and sequences.size(1) == 1:
+            sequences = sequences.squeeze(1)
+        if sequences.dim() != 2:
+            raise ValueError('Index-mode sequences must be 2D (N, seq_len)')
+        sequences = sequences.long().clamp(0, expected_amino - 1)
+        N, T = sequences.size()
+        onehot = torch.zeros((N, expected_amino, T), dtype=torch.float32)
+        onehot.scatter_(1, sequences.unsqueeze(1), 1.0)
+        sequences = onehot
+    else:
+        # existing one-hot mode
+        sequences = sequences.float()
 
     # Load or infer attributes
     attr_path = os.path.join(params.data_path, "attributes.pth")
@@ -102,18 +127,26 @@ def load_sequences(params, alphabet_type="normal"):
 
     if os.path.isfile(label_path):
         labels = torch.load(label_path)
+        labels = labels.float()
         params.n_attr = labels.size(1)
         logger.info(f"Detected {params.n_attr} attributes from label tensor.")
     else:
         # if no labels, generate random dummy attributes
         N = sequences.size(0)
-        params.n_attr = 2
-        labels = torch.randint(0, 2, (N, params.n_attr), dtype=torch.float32)
-        logger.warning("No labels found; generated random attributes for testing.")
+        if params.label_type == 'continuous':
+            params.n_attr = 1
+            labels = torch.rand(N, params.n_attr, dtype=torch.float32)
+        else:
+            params.n_attr = 2
+            labels = torch.randint(0, 2, (N, params.n_attr), dtype=torch.float32)
+        logger.warning("No labels found; generated random labels for testing.")
 
     # Save attribute metadata if missing
     if not os.path.isfile(attr_path):
-        attributes = [(f"Attribute{i+1}", int(labels[:, i].unique().numel())) for i in range(params.n_attr)]
+        if params.label_type == 'continuous':
+            attributes = [("ContinuousAttr", 1)]
+        else:
+            attributes = [(f"Attribute{i+1}", int(labels[:, i].unique().numel())) for i in range(params.n_attr)]
         torch.save(attributes, attr_path)
         logger.info(f"Saved inferred attributes to {attr_path}")
 
@@ -138,6 +171,33 @@ class DataSampler(object):
     """Samples random batches of one-hot sequences and binary labels."""
 
     def __init__(self, sequences, labels, params):
+        # sequences can be one-hot ([N, C, T]) or indices ([N, T])
+        if getattr(params, 'x_type', 'onehot') == 'indices':
+            if sequences.dim() == 2:
+                N, T = sequences.size()
+                C = getattr(params, 'n_amino', None)
+                assert C is not None, "n_amino must be set for index -> onehot conversion"
+                seq_ids = sequences.long().clamp(0, C - 1)
+                onehot = torch.zeros((N, C, T), dtype=torch.float32)
+                onehot.scatter_(1, seq_ids.unsqueeze(1), 1.0)
+                sequences = onehot
+            elif sequences.dim() == 3:
+                # either already onehot (N,C,T), or indices with channel dim 1 (N,1,T)
+                if sequences.size(1) == 1:
+                    sequences = sequences.squeeze(1)
+                    N, T = sequences.size()
+                    C = getattr(params, 'n_amino', None)
+                    assert C is not None, "n_amino must be set for index -> onehot conversion"
+                    seq_ids = sequences.long().clamp(0, C - 1)
+                    onehot = torch.zeros((N, C, T), dtype=torch.float32)
+                    onehot.scatter_(1, seq_ids.unsqueeze(1), 1.0)
+                    sequences = onehot
+                else:
+                    # already one-hot tensor, keep as is
+                    pass
+            else:
+                raise ValueError("Unsupported index sequence shape for x_type='indices'")
+
         self.sequences = sequences
         self.labels = labels
         self.batch_size = params.batch_size

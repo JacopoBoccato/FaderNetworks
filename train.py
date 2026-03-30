@@ -58,6 +58,12 @@ parser.add_argument("--n_lat_dis", type=int, default=1)
 parser.add_argument("--n_ptc_dis", type=int, default=0)
 parser.add_argument("--n_clf_dis", type=int, default=0)
 
+# label type: binary classification or continuous regression
+parser.add_argument("--label_type", type=str, default="binary", choices=["binary", "continuous"],
+                    help="Type of label for latent discriminator: binary/categorical or continuous")
+parser.add_argument("--x_type", type=str, default="onehot", choices=["onehot", "indices"],
+                    help="Input sequence representation: onehot or index ids")
+
 # ============================================================
 # Loss weights
 # ============================================================
@@ -138,7 +144,7 @@ if not params.attr:
 logger = initialize_exp(params)
 
 logger.info(f"Loading dataset using '{params.alphabet_type}' alphabet ({params.n_amino} symbols)...")
-data, labels = load_sequences(params, alphabet_type=params.alphabet_type)
+data, labels = load_sequences(params, alphabet_type=params.alphabet_type, x_type=params.x_type)
 train_data = DataSampler(data[0], labels[0], params)
 valid_data = DataSampler(data[1], labels[1], params)
 logger.info(f"Dataset loaded: {len(train_data)} train / {len(valid_data)} valid samples")

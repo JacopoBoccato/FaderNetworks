@@ -12,6 +12,8 @@ class Params:
     n_skip = 1
     deconv_method = "convtranspose"
     dec_dropout = 0.0
+    encoder_hidden_dims = [1024, 256]
+    decoder_hidden_dims = [256, 1024]
     attr = [("BinaryAttr", 2)]
     n_attr = 2
 

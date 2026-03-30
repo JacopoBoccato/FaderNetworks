@@ -83,8 +83,15 @@ def attr_flag(s):
 def check_attr(params):
     """
     Validate and set attribute names and number of categories.
-    In the sequence version, AVAILABLE_ATTR is not imported; we trust the user‑provided list.
+    In the sequence version, AVAILABLE_ATTR is not imported; we trust the user-provided list.
     """
+    if params.label_type == 'continuous':
+        # continuous labels are scalar/regression values
+        params.attr = []
+        params.n_attr = 1
+        return
+
+    # binary/categorical labels
     if params.attr == '*':
         # You can decide how to handle '*' here (e.g. take all labels from dataset).
         # For simplicity, we assume '*' is not used and raise an error.

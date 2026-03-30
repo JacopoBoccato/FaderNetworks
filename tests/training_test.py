@@ -9,6 +9,9 @@ class P:
     seq_len=64; n_amino=21; instance_norm=False
     init_fm=32; max_fm=128; n_layers=5; n_skip=1
     deconv_method='convtranspose'; dec_dropout=0.0
+    encoder_hidden_dims=[512, 128]
+    decoder_hidden_dims=[128, 512]
+    dis_hidden_dims=[128, 64]
     hid_dim=128; lat_dis_dropout=0.3
     attr=[("BinaryAttr", 2)]; n_attr=2
     n_lat_dis=1; n_ptc_dis=0; n_clf_dis=0
@@ -18,6 +21,7 @@ class P:
     ae_optimizer="adam,lr=0.0005"; dis_optimizer="adam,lr=0.0005"
     clip_grad_norm=5.0
     cuda=False
+    x_type='onehot'
     dump_path="."
     n_total_iter=0
 
@@ -47,4 +51,35 @@ trainer.lat_dis_step()
 trainer.autoencoder_step()
 trainer.step(0)
 
-print("✅ Trainer one-step smoke test passed.")
+# continuous target test
+params_cont = P()
+params_cont.label_type = 'continuous'
+params_cont.attr = []
+params_cont.n_attr = 1
+x_cont = torch.rand(N, params_cont.n_amino, params_cont.seq_len)
+y_cont = torch.rand(N, params_cont.n_attr)
+
+data_cont = DataSampler(x_cont, y_cont, params_cont)
+
+ae_cont = AutoEncoder(params_cont)
+lat_dis_cont = LatentDiscriminator(params_cont)
+trainer_cont = Trainer(ae_cont, lat_dis_cont, None, None, data_cont, params_cont)
+trainer_cont.lat_dis_step()
+trainer_cont.autoencoder_step()
+trainer_cont.step(0)
+
+# indexed-X pipeline test
+params_idx = P()
+params_idx.x_type = 'indices'
+x_idx = torch.randint(0, params_idx.n_amino, (N, params_idx.seq_len), dtype=torch.long)
+y_idx = torch.randint(0, 2, (N, params_idx.n_attr)).float()
+
+data_idx = DataSampler(x_idx, y_idx, params_idx)
+ae_idx = AutoEncoder(params_idx)
+lat_dis_idx = LatentDiscriminator(params_idx)
+trainer_idx = Trainer(ae_idx, lat_dis_idx, None, None, data_idx, params_idx)
+trainer_idx.lat_dis_step()
+trainer_idx.autoencoder_step()
+trainer_idx.step(0)
+
+print("✅ Trainer one-step smoke tests (binary + continuous + indices X) passed.")

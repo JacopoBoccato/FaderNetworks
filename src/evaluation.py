@@ -63,15 +63,25 @@ class Evaluator(object):
 
 
     # -------------------------------------------------------
-    #  Latent discriminator accuracy
+    #  Latent discriminator metric
     # -------------------------------------------------------
-    def eval_lat_dis_accuracy(self):
-        """Compute the latent discriminator prediction accuracy."""
+    def eval_lat_dis_metric(self):
         data = self.data
         params = self.params
         self.ae.eval()
         self.lat_dis.eval()
         bs = params.batch_size
+
+        if params.label_type == 'continuous':
+            total_mse = 0.0
+            total_samples = 0
+            for i in range(0, len(data), bs):
+                batch_x, batch_y = data.eval_batch(i, i + bs)
+                enc_outputs = self.ae.encode(batch_x)
+                preds = self.lat_dis(enc_outputs[-1]).detach()
+                total_mse += ((preds - batch_y) ** 2).sum().item()
+                total_samples += preds.numel()
+            return total_mse / max(1, total_samples)
 
         all_preds = [[] for _ in range(len(params.attr))]
         for i in range(0, len(data), bs):
@@ -145,12 +155,16 @@ class Evaluator(object):
         # Latent discriminator
         log_lat_dis = []
         if params.n_lat_dis:
-            lat_dis_accu = self.eval_lat_dis_accuracy()
-            log_lat_dis.append(("lat_dis_accu", np.mean(lat_dis_accu)))
-            for accu, (name, _) in zip(lat_dis_accu, params.attr):
-                log_lat_dis.append((f"lat_dis_accu_{name}", accu))
-            logger.info("Latent discriminator accuracy:")
-            print_accuracies(log_lat_dis)
+            lat_dis_metric = self.eval_lat_dis_metric()
+            if params.label_type == 'continuous':
+                log_lat_dis.append(("lat_dis_mse", lat_dis_metric))
+                logger.info("Latent discriminator MSE: %.5f" % lat_dis_metric)
+            else:
+                log_lat_dis.append(("lat_dis_accu", np.mean(lat_dis_metric)))
+                for accu, (name, _) in zip(lat_dis_metric, params.attr):
+                    log_lat_dis.append((f"lat_dis_accu_{name}", accu))
+                logger.info("Latent discriminator accuracy:")
+                print_accuracies(log_lat_dis)
 
         # Patch discriminator
         log_ptc_dis = []

@@ -39,20 +39,29 @@ def make_random_sequences(n_samples, seq_len, alphabet_type):
 # ============================================================
 # Dataset builder
 # ============================================================
-def make_dataset(n_samples, seq_len, alphabet_type):
-    sequences = make_random_sequences(n_samples, seq_len, alphabet_type)
-    encoded, alphabet = onehot_encode_sequences(sequences, alphabet_type, seq_len)
-    labels = torch.randint(0, 2, (n_samples, 2), dtype=torch.float32)
-    return encoded, labels
+def make_dataset(n_samples, seq_len, alphabet_type, x_type='onehot'):
+    if x_type == 'onehot':
+        sequences = make_random_sequences(n_samples, seq_len, alphabet_type)
+        encoded, alphabet = onehot_encode_sequences(sequences, alphabet_type, seq_len)
+        labels = torch.randint(0, 2, (n_samples, 2), dtype=torch.float32)
+        return encoded, labels
+    elif x_type == 'indices':
+        alphabet = get_alphabet(alphabet_type)
+        n_symbols = len(alphabet)
+        encoded = torch.randint(0, n_symbols, (n_samples, seq_len), dtype=torch.long)
+        labels = torch.randint(0, 2, (n_samples, 2), dtype=torch.float32)
+        return encoded, labels
+    else:
+        raise ValueError(f"Unknown x_type: {x_type}")
 
 # ============================================================
 # Generate and save both .npy and .pth formats
 # ============================================================
 print("🧬 Generating dummy training data...")
-train_X, train_y = make_dataset(n_train, seq_len, alphabet_type)
+train_X, train_y = make_dataset(n_train, seq_len, alphabet_type, x_type='onehot')
 
 print("🧪 Generating dummy validation data...")
-valid_X, valid_y = make_dataset(n_valid, seq_len, alphabet_type)
+valid_X, valid_y = make_dataset(n_valid, seq_len, alphabet_type, x_type='onehot')
 
 # Save as NumPy arrays (optional)
 np.save(os.path.join(data_dir, "train_sequences.npy"), train_X.numpy())

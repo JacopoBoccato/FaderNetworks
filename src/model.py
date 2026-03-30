@@ -125,6 +125,22 @@ def _parse_dims(s):
 
 def get_attr_loss(output, attributes, flip, params):
     assert isinstance(flip, bool)
+
+    if getattr(params, 'label_type', 'binary') == 'continuous':
+        # output: (B, n_attr) or (B,1); target: same shape
+        if output.dim() == 1:
+            output = output.unsqueeze(1)
+        if attributes.dim() == 1:
+            attributes = attributes.unsqueeze(1)
+        if flip:
+            # avoid using groundtruth for adversarial latent loss in regression mode
+            noise = torch.randn_like(attributes) * getattr(params, 'label_noise', 0.1)
+            if attributes.is_cuda:
+                noise = noise.cuda()
+            attributes = attributes + noise
+        return F.mse_loss(output, attributes, reduction='mean')
+
+    # existing categorical version (binary + multiclass)
     k = 0
     loss = 0
     for (_, n_cat) in params.attr:
@@ -178,6 +194,14 @@ def get_mappings(params):
     return params.mappings
 
 def flip_attributes(attributes, params, attribute_id, new_value=None):
+    if getattr(params, 'label_type', 'binary') == 'continuous':
+        # for regression, flip means add small random noise around the target value
+        attributes = attributes.clone()
+        noise = torch.randn_like(attributes) * getattr(params, 'label_noise', 0.1)
+        if attributes.is_cuda:
+            noise = noise.cuda()
+        return Variable((attributes + noise).cuda() if attributes.is_cuda else attributes + noise)
+
     assert attributes.size(1) == params.n_attr
     mappings = get_mappings(params)
     attributes = attributes.data.clone().cpu()
