@@ -20,12 +20,12 @@ Choose via `--x_type` in `train.py` or `run_many_experiments.py`.
 - **File**: Save as `sequences_{seq_len}.pth` (PyTorch tensor).
 - **When to use**: Standard for categorical sequences; directly compatible with the model's categorical cross-entropy loss.
 
-#### Option 2: `token`
-- **Description**: Sequences as integer token indices.
-- **Format**: Tensor of shape [N, seq_len], where each value is an integer index into the alphabet (0 to n_symbols-1).
-- **Example**: For amino acids, 'A' -> 0, 'C' -> 1, etc.
-- **File**: Save as `sequences_{seq_len}.pth` (PyTorch tensor). The loader converts to one-hot internally.
-- **When to use**: If your data is already tokenized (e.g., from a tokenizer or embedding layer); saves space and preprocessing.
+#### Option 2: `continuous`
+- **Description**: Sequences as real-valued vectors.
+- **Format**: Tensor of shape [N, seq_len], with float values.
+- **Example**: Random floats or analytical data points.
+- **File**: Save as `sequences_{seq_len}.pth` (PyTorch tensor).
+- **When to use**: For continuous inputs, e.g., to verify analytical calculations.
 
 ### 2. Attribute Representation (Y)
 Choose via `--label_type` in `train.py` or `run_many_experiments.py`.
@@ -49,8 +49,8 @@ The framework supports 4 combinations of X and Y representations:
 
 1. **X: onehot, Y: binary** - Standard categorical sequences with binary attributes.
 2. **X: onehot, Y: continuous** - Categorical sequences with continuous attributes.
-3. **X: token, Y: binary** - Tokenized sequences with binary attributes.
-4. **X: token, Y: continuous** - Tokenized sequences with continuous attributes.
+3. **X: continuous, Y: binary** - Continuous sequences with binary attributes.
+4. **X: continuous, Y: continuous** - Continuous sequences with continuous attributes.
 
 ## File Structure
 Place dataset files in a directory (e.g., `data/`):
@@ -66,8 +66,9 @@ Place dataset files in a directory (e.g., `data/`):
 
 ## Notes
 - Sequences are padded/truncated to `seq_len`.
-- Alphabet is auto-detected from `alphabet_type` (normal, lattice, rna).
+- Alphabet is auto-detected from `alphabet_type` (normal, lattice, rna), but ignored for continuous X.
 - For continuous Y, the latent discriminator acts as a regressor.
+- For continuous X, reconstruction uses MSE instead of cross-entropy.
 - Models are saved in `models/` directory.
 - Use `create_dummy_dataset.py` to generate test data.
 

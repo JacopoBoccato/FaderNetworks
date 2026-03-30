@@ -32,7 +32,7 @@ def save_dummy_dataset(data_path, seq_len, n_train, n_valid, alphabet_type, x_ty
         valid_seq = make_random_sequences(n_valid, seq_len, alphabet_type)
         train_X, _ = onehot_encode_sequences(train_seq, alphabet_type, seq_len)
         valid_X, _ = onehot_encode_sequences(valid_seq, alphabet_type, seq_len)
-    elif x_type == 'indices':
+    elif x_type == 'continuous':
         n_symbols = len(get_alphabet(alphabet_type))
         train_X = torch.randint(0, n_symbols, (n_train, seq_len), dtype=torch.long)
         valid_X = torch.randint(0, n_symbols, (n_valid, seq_len), dtype=torch.long)
@@ -82,7 +82,7 @@ if __name__ == '__main__':
     parser.add_argument('--n_epochs', type=int, default=5)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--label_types', type=str, default='binary,continuous')
-    parser.add_argument('--x_type', type=str, default='onehot', choices=['onehot', 'indices'])
+    parser.add_argument('--x_type', type=str, default='onehot', choices=['onehot', 'continuous'])
     parser.add_argument('--seed', type=int, default=42)
 
     args = parser.parse_args()

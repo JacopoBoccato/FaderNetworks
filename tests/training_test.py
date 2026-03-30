@@ -3,6 +3,7 @@ import torch
 from src.model import AutoEncoder, LatentDiscriminator
 from src.training import Trainer
 from src.loader import DataSampler
+from src.utils import check_attr
 
 # --- dummy params ---
 class P:
@@ -54,8 +55,7 @@ trainer.step(0)
 # continuous target test
 params_cont = P()
 params_cont.label_type = 'continuous'
-params_cont.attr = []
-params_cont.n_attr = 1
+check_attr(params_cont)
 x_cont = torch.rand(N, params_cont.n_amino, params_cont.seq_len)
 y_cont = torch.rand(N, params_cont.n_attr)
 
@@ -70,9 +70,11 @@ trainer_cont.step(0)
 
 # indexed-X pipeline test
 params_idx = P()
-params_idx.x_type = 'indices'
-x_idx = torch.randint(0, params_idx.n_amino, (N, params_idx.seq_len), dtype=torch.long)
-y_idx = torch.randint(0, 2, (N, params_idx.n_attr)).float()
+params_idx.x_type = 'continuous'
+params_idx.label_type = 'continuous'
+check_attr(params_idx)
+x_idx = torch.rand(N, params_idx.seq_len, dtype=torch.float32)
+y_idx = torch.rand(N, params_idx.n_attr, dtype=torch.float32)
 
 data_idx = DataSampler(x_idx, y_idx, params_idx)
 ae_idx = AutoEncoder(params_idx)
@@ -82,4 +84,4 @@ trainer_idx.lat_dis_step()
 trainer_idx.autoencoder_step()
 trainer_idx.step(0)
 
-print("✅ Trainer one-step smoke tests (binary + continuous + indices X) passed.")
+print("✅ Trainer one-step smoke tests (binary + continuous + continuous X) passed.")

@@ -26,23 +26,33 @@ class AutoEncoder(nn.Module):
         super(AutoEncoder, self).__init__()
 
         self.seq_len = params.seq_len
-        self.n_amino = params.n_amino
-        self.input_dim = self.seq_len * self.n_amino
+        self.x_type = getattr(params, 'x_type', 'onehot')
+        if self.x_type == 'continuous':
+            self.input_dim = self.seq_len
+            self.output_dim = self.seq_len
+        else:
+            self.n_amino = params.n_amino
+            self.input_dim = self.seq_len * self.n_amino
+            self.output_dim = self.seq_len * self.n_amino
+
         self.attr_dim = getattr(params, "n_attr", 0)
 
         # Encoder: input_dim → encoder_hidden_dims
         self.encoder = build_dense_layers(self.input_dim, params.encoder_hidden_dims)
         self.latent_dim = params.encoder_hidden_dims[-1]
 
-        # Decoder: latent_dim+attr_dim → decoder_hidden_dims → input_dim
+        # Decoder: latent_dim+attr_dim → decoder_hidden_dims → output_dim
         self.decoder = build_dense_layers(self.latent_dim + self.attr_dim,
-                                          params.decoder_hidden_dims + [self.input_dim])
+                                          params.decoder_hidden_dims + [self.output_dim])
 
         params.hid_dim = self.latent_dim
 
     def encode(self, x):
         bs = x.size(0)
-        x_flat = x.view(bs, -1)
+        if self.x_type == 'continuous':
+            x_flat = x.view(bs, -1)
+        else:
+            x_flat = x.view(bs, -1)
         z = self.encoder(x_flat)
         return [None] * (len(self.encoder) // 2 - 1) + [z]
 
@@ -51,7 +61,10 @@ class AutoEncoder(nn.Module):
         if y is not None:
             z = torch.cat([z, y], dim=1)
         x_hat = self.decoder(z)
-        x_hat = x_hat.view(-1, self.n_amino, self.seq_len)
+        if self.x_type == 'continuous':
+            x_hat = x_hat.view(-1, self.seq_len)
+        else:
+            x_hat = x_hat.view(-1, self.n_amino, self.seq_len)
         return [None] * (len(self.decoder) // 2 - 1) + [x_hat]
 
     def forward(self, x, y=None):
@@ -155,21 +168,21 @@ def get_attr_loss(output, attributes, flip, params):
         k += n_cat
     return loss
 
-def sequence_cross_entropy(x_hat, x_true):
+def sequence_reconstruction_loss(x_hat, x_true, x_type='onehot'):
     """
-    Cross-entropy for sequence reconstruction.
-    x_hat: (B, V, T) raw logits
-    x_true: (B, V, T) one-hot ground truth
+    Reconstruction loss for sequences.
+    For onehot: categorical cross-entropy.
+    For continuous: MSE.
     """
-    B, V, T = x_hat.shape
-
-    # targets: (B*T,)
-    target = x_true.argmax(dim=1).reshape(B * T)
-
-    # logits: (B*T, V)
-    logits = x_hat.permute(0, 2, 1).contiguous().reshape(B * T, V)
-
-    return F.cross_entropy(logits, target, reduction='mean')
+    if x_type == 'continuous':
+        # x_hat and x_true: [B, T] floats
+        return F.mse_loss(x_hat, x_true, reduction='mean')
+    else:
+        # one-hot mode: categorical cross-entropy
+        B, V, T = x_hat.shape
+        target = x_true.argmax(dim=1).reshape(B * T)
+        logits = x_hat.permute(0, 2, 1).contiguous().reshape(B * T, V)
+        return F.cross_entropy(logits, target, reduction='mean')
 
 
 def update_predictions(all_preds, preds, targets, params):

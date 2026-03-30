@@ -10,7 +10,7 @@ from torch.nn import functional as F
 from logging import getLogger
 
 from .utils import get_optimizer, clip_grad_norm, get_lambda, reload_model
-from .model import get_attr_loss, flip_attributes, sequence_cross_entropy
+from .model import get_attr_loss, flip_attributes, sequence_reconstruction_loss
 
 logger = getLogger()
 
@@ -138,8 +138,8 @@ class Trainer(object):
         enc_outputs, dec_outputs = self.ae(batch_x, batch_y)
         recon = dec_outputs[-1]
 
-        # 🔁 Updated: sequence-level categorical cross-entropy
-        rec_loss = sequence_cross_entropy(recon, batch_x)
+        # 🔁 Updated: sequence-level reconstruction loss (CE for onehot, MSE for continuous)
+        rec_loss = sequence_reconstruction_loss(recon, batch_x, self.params.x_type)
         loss = self.params.lambda_ae * rec_loss
         self.stats['rec_costs'].append(rec_loss.item())
 

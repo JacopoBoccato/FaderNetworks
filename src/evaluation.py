@@ -8,7 +8,7 @@ import json
 import numpy as np
 from logging import getLogger
 
-from .model import update_predictions, flip_attributes, sequence_cross_entropy
+from .model import update_predictions, flip_attributes, sequence_reconstruction_loss
 from .utils import print_accuracies
 
 logger = getLogger()
@@ -53,11 +53,18 @@ class Evaluator(object):
             batch_x, batch_y = data.eval_batch(i, i + bs)
             _, dec_outputs = self.ae(batch_x, batch_y)
             x_hat = dec_outputs[-1]
-            # same CE as in training (per-token mean)
-            B, V, T = x_hat.shape
-            ce = sequence_cross_entropy(x_hat, batch_x)      # per-token mean
-            total_loss += ce.item() * (B * T)
-            total_tokens += B * T
+            # same loss as in training (CE for onehot, MSE for continuous)
+            B = x_hat.size(0)
+            if params.x_type == 'continuous':
+                T = x_hat.size(1)
+                ce = sequence_reconstruction_loss(x_hat, batch_x, params.x_type)
+                total_loss += ce.item() * (B * T)
+                total_tokens += B * T
+            else:
+                V, T = x_hat.size(1), x_hat.size(2)
+                ce = sequence_reconstruction_loss(x_hat, batch_x, params.x_type)
+                total_loss += ce.item() * (B * T)
+                total_tokens += B * T
 
         return total_loss / max(1, total_tokens)
 

@@ -61,8 +61,8 @@ parser.add_argument("--n_clf_dis", type=int, default=0)
 # label type: binary classification or continuous regression
 parser.add_argument("--label_type", type=str, default="binary", choices=["binary", "continuous"],
                     help="Type of label for latent discriminator: binary/categorical or continuous")
-parser.add_argument("--x_type", type=str, default="onehot", choices=["onehot", "indices"],
-                    help="Input sequence representation: onehot or index ids")
+parser.add_argument("--x_type", type=str, default="onehot", choices=["onehot", "continuous"],
+                    help="Input sequence representation: onehot (categorical) or continuous (real-valued)")
 
 # ============================================================
 # Loss weights

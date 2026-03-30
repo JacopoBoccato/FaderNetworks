@@ -106,17 +106,13 @@ def load_sequences(params, alphabet_type="normal", x_type="onehot"):
     seq_path = os.path.join(params.data_path, f"sequences_{params.seq_len}.pth")
     sequences = torch.load(seq_path)
 
-    if x_type == 'indices':
-        # sequences expected as [N, T] or [N,1,T]
+    if x_type == 'continuous':
+        # sequences expected as [N, T] float values
+        sequences = sequences.float()
         if sequences.dim() == 3 and sequences.size(1) == 1:
             sequences = sequences.squeeze(1)
         if sequences.dim() != 2:
-            raise ValueError('Index-mode sequences must be 2D (N, seq_len)')
-        sequences = sequences.long().clamp(0, expected_amino - 1)
-        N, T = sequences.size()
-        onehot = torch.zeros((N, expected_amino, T), dtype=torch.float32)
-        onehot.scatter_(1, sequences.unsqueeze(1), 1.0)
-        sequences = onehot
+            raise ValueError('Continuous-mode sequences must be 2D (N, seq_len)')
     else:
         # existing one-hot mode
         sequences = sequences.float()
@@ -171,34 +167,25 @@ class DataSampler(object):
     """Samples random batches of one-hot sequences and binary labels."""
 
     def __init__(self, sequences, labels, params):
-        # sequences can be one-hot ([N, C, T]) or indices ([N, T])
-        if getattr(params, 'x_type', 'onehot') == 'indices':
+        # sequences can be one-hot ([N, C, T]) or continuous ([N, T])
+        if getattr(params, 'x_type', 'onehot') == 'continuous':
             if sequences.dim() == 2:
-                N, T = sequences.size()
-                C = getattr(params, 'n_amino', None)
-                assert C is not None, "n_amino must be set for index -> onehot conversion"
-                seq_ids = sequences.long().clamp(0, C - 1)
-                onehot = torch.zeros((N, C, T), dtype=torch.float32)
-                onehot.scatter_(1, seq_ids.unsqueeze(1), 1.0)
-                sequences = onehot
-            elif sequences.dim() == 3:
-                # either already onehot (N,C,T), or indices with channel dim 1 (N,1,T)
-                if sequences.size(1) == 1:
-                    sequences = sequences.squeeze(1)
-                    N, T = sequences.size()
-                    C = getattr(params, 'n_amino', None)
-                    assert C is not None, "n_amino must be set for index -> onehot conversion"
-                    seq_ids = sequences.long().clamp(0, C - 1)
-                    onehot = torch.zeros((N, C, T), dtype=torch.float32)
-                    onehot.scatter_(1, seq_ids.unsqueeze(1), 1.0)
-                    sequences = onehot
-                else:
-                    # already one-hot tensor, keep as is
-                    pass
+                # already [N, T] continuous
+                pass
+            elif sequences.dim() == 3 and sequences.size(1) == 1:
+                sequences = sequences.squeeze(1)
             else:
-                raise ValueError("Unsupported index sequence shape for x_type='indices'")
+                raise ValueError("Unsupported continuous sequence shape for x_type='continuous'")
+        else:
+            # one-hot mode, ensure [N, C, T]
+            pass
 
         self.sequences = sequences
+        self.labels = labels
+        self.batch_size = params.batch_size
+        self.use_cuda = getattr(params, "cuda", False)
+        self._index = 0
+        self._order = torch.randperm(self.sequences.size(0))
         self.labels = labels
         self.batch_size = params.batch_size
         self.use_cuda = getattr(params, "cuda", False)
