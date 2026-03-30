@@ -65,12 +65,12 @@ Place dataset files in a directory (e.g., `data/`):
 4. Monitor logs for reconstruction loss and attribute metrics (accuracy for binary, MSE for continuous).
 
 ## Notes
-- Sequences are padded/truncated to `seq_len`.
 - Alphabet is auto-detected from `alphabet_type` (normal, lattice, rna), but ignored for continuous X.
 - For continuous Y, the latent discriminator acts as a regressor.
 - For continuous X, reconstruction uses MSE instead of cross-entropy.
 - Models are saved in `models/` directory.
 - Use `create_dummy_dataset.py` to generate test data.
+- Sequences must be exactly of length `seq_len`; the framework will report an error if not.
 
 ## Example Command
 python train.py --seq_len 128 --data_path data --x_type onehot --label_type binary --n_epochs 10 --batch_size 32

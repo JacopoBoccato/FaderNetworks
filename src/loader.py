@@ -117,6 +117,11 @@ def load_sequences(params, alphabet_type="normal", x_type="onehot"):
         # existing one-hot mode
         sequences = sequences.float()
 
+    # Check that all sequences are exactly of length seq_len
+    if sequences.shape[-1] != params.seq_len:
+        raise ValueError(f"All sequences must be exactly of length {params.seq_len}, "
+                         f"but found sequences with length {sequences.shape[-1]}")
+
     # Load or infer attributes
     attr_path = os.path.join(params.data_path, "attributes.pth")
     label_path = os.path.join(params.data_path, f"labels_{params.seq_len}.pth")
