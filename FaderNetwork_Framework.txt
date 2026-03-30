@@ -1,0 +1,75 @@
+# FaderNetwork Training Framework
+
+## Overview
+FaderNetworks are a type of conditional autoencoder designed for controlled generation of sequences (e.g., proteins, RNA) by manipulating latent attributes. The model learns to encode sequences into a latent space invariant to certain attributes, while a decoder reconstructs sequences by injecting those attributes. This allows "sliding" attributes to generate variations.
+
+## Dataset Requirements
+To train a FaderNetwork, you need:
+- **Sequences (X)**: Biological sequences (e.g., amino acids or nucleotides).
+- **Attributes (Y)**: Labels or values associated with each sequence, which the model learns to control.
+
+The framework supports different representations for both X and Y to handle various data types.
+
+### 1. Sequence Representation (X)
+Choose via `--x_type` in `train.py` or `run_many_experiments.py`.
+
+#### Option 1: `onehot` (default)
+- **Description**: Sequences encoded as one-hot vectors.
+- **Format**: Tensor of shape [N, n_symbols, seq_len], where N is number of samples, n_symbols is alphabet size (e.g., 21 for amino acids), seq_len is fixed sequence length.
+- **Example**: For amino acids, each position is a vector of 21 floats (one 1.0, rest 0.0).
+- **File**: Save as `sequences_{seq_len}.pth` (PyTorch tensor).
+- **When to use**: Standard for categorical sequences; directly compatible with the model's categorical cross-entropy loss.
+
+#### Option 2: `token`
+- **Description**: Sequences as integer token indices.
+- **Format**: Tensor of shape [N, seq_len], where each value is an integer index into the alphabet (0 to n_symbols-1).
+- **Example**: For amino acids, 'A' -> 0, 'C' -> 1, etc.
+- **File**: Save as `sequences_{seq_len}.pth` (PyTorch tensor). The loader converts to one-hot internally.
+- **When to use**: If your data is already tokenized (e.g., from a tokenizer or embedding layer); saves space and preprocessing.
+
+### 2. Attribute Representation (Y)
+Choose via `--label_type` in `train.py` or `run_many_experiments.py`.
+
+#### Option 1: `binary` (default)
+- **Description**: Categorical attributes with 2 categories (e.g., male/female, positive/negative).
+- **Format**: Tensor of shape [N, n_attr], where each attribute is one-hot encoded (e.g., [1,0] for category 0, [0,1] for category 1).
+- **File**: Save as `labels_{seq_len}.pth` (PyTorch tensor).
+- **Loss**: Cross-entropy for classification.
+- **When to use**: For discrete binary or multi-class attributes.
+
+#### Option 2: `continuous`
+- **Description**: Real-valued attributes (e.g., temperature, expression level).
+- **Format**: Tensor of shape [N, 1], with float values (e.g., [0.5], [1.2]).
+- **File**: Save as `labels_{seq_len}.pth` (PyTorch tensor).
+- **Loss**: Mean Squared Error (MSE) for regression.
+- **When to use**: For continuous or scalar attributes.
+
+## All Possible Cases
+The framework supports 4 combinations of X and Y representations:
+
+1. **X: onehot, Y: binary** - Standard categorical sequences with binary attributes.
+2. **X: onehot, Y: continuous** - Categorical sequences with continuous attributes.
+3. **X: token, Y: binary** - Tokenized sequences with binary attributes.
+4. **X: token, Y: continuous** - Tokenized sequences with continuous attributes.
+
+## File Structure
+Place dataset files in a directory (e.g., `data/`):
+- `sequences_{seq_len}.pth`: Sequences (onehot or token tensor).
+- `labels_{seq_len}.pth`: Attributes (binary onehot or continuous floats).
+- Optional: `attributes.pth`: Metadata list of attribute names and categories (auto-generated if missing).
+
+## Training Steps
+1. Prepare your dataset in the required format.
+2. Run `python train.py --seq_len <len> --data_path <path> --x_type <onehot|token> --label_type <binary|continuous> --name <exp_name>`.
+3. Or use `python run_many_experiments.py` for multiple runs.
+4. Monitor logs for reconstruction loss and attribute metrics (accuracy for binary, MSE for continuous).
+
+## Notes
+- Sequences are padded/truncated to `seq_len`.
+- Alphabet is auto-detected from `alphabet_type` (normal, lattice, rna).
+- For continuous Y, the latent discriminator acts as a regressor.
+- Models are saved in `models/` directory.
+- Use `create_dummy_dataset.py` to generate test data.
+
+## Example Command
+python train.py --seq_len 128 --data_path data --x_type onehot --label_type binary --n_epochs 10 --batch_size 32
