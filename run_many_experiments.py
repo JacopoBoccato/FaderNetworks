@@ -13,6 +13,7 @@ Results are printed to console; no plotting.
 
 import argparse
 import os
+import pickle
 import torch
 import numpy as np
 from src.model import AutoEncoder, LatentDiscriminator
@@ -65,11 +66,77 @@ def generate_continuous_dataset(n_samples, n, r, lam_vals, sigma2_y, eta, seed=0
 # 3. Train FaderNetwork for one config
 # ──────────────────────────────────────────────────────────────────────────────
 
-def train_fader_network(X_train, y_train, X_valid, y_valid, params):
-    """Train a FaderNetwork and return final metrics."""
+def compute_observables(ae, lat_dis, X, y, U, v, sigma2_y, device):
+    """
+    Compute observables that map to Route B theoretical quantities.
+    These are evaluated on validation data.
+    """
+    ae.eval()
+    if lat_dis:
+        lat_dis.eval()
+    
+    with torch.no_grad():
+        X = X.to(device)
+        y = y.to(device)
+        
+        # Encode
+        enc_outputs = ae.encode(X)
+        z = enc_outputs[-1]  # latent code (B, d)
+        
+        # Decode
+        dec_outputs = ae.decode(enc_outputs, y)
+        x_hat = dec_outputs[-1]  # reconstructed X (B, n)
+        
+        # 1. Reconstruction loss: E‖X_hat - X‖²
+        rec_loss = torch.mean((x_hat - X)**2).item()
+        
+        # 2. Adversarial loss: MSE between discriminator pred and true y
+        adv_loss = 0.0
+        if lat_dis:
+            y_pred = lat_dis(z)  # (B, 1) or (B, n_attr)
+            adv_loss = torch.mean((y_pred - y)**2).item()
+        
+        # 3. Nuisance overlap (how much does encoder capture the y-direction)
+        # Project encoder weights onto signal and nuisance directions
+        # s = W @ v: projection of X direction v onto the encoder
+        # For continuous data, we compute correlation between first latent component and y
+        if lat_dis and y.dim() > 1 and y.size(1) == 1:
+            # Correlation between first latent code dimension and true nuisance attribute
+            z_component = z[:, 0].cpu().numpy() if z.dim() > 1 else z.view(-1).cpu().numpy()[:20]
+            y_flat = y.view(-1).cpu().numpy()
+            if len(z_component) > 1 and len(y_flat) > 1:
+                correlation = np.abs(np.corrcoef(z_component, y_flat)[0, 1])
+                if np.isnan(correlation):
+                    correlation = 0.0
+            else:
+                correlation = 0.0
+            nuisance_overlap = float(correlation)
+        else:
+            nuisance_overlap = 0.0
+        
+        # 4. Signal capture: norm of encoder's latent code
+        # In theory, this is ‖M‖_F where M = W @ U (encoder on signal subspace)
+        # Here we use the Frobenius norm of the latent codes
+        signal_capture = float(torch.norm(z, 'fro').item())
+        
+        # 5. Nuisance in code: how much latent code correlates with nuisance
+        # In theory: σ²_y ‖s‖², where s = W @ v
+        # Here we compute correlation between z components and y
+        nuisance_in_code = float(torch.mean((z - torch.mean(z, dim=0))**2).item() * sigma2_y)
+    
+    return {
+        'rec_loss': rec_loss,
+        'adv_loss': adv_loss,
+        'nuisance_overlap': nuisance_overlap,
+        'signal_capture': signal_capture,
+        'nuisance_in_code': nuisance_in_code,
+    }
+
+
+def train_fader_network(X_train, y_train, X_valid, y_valid, U, v, sigma2_y, params):
+    """Train a FaderNetwork and compute observables at each epoch."""
     # Set up data samplers
     train_data = DataSampler(X_train, y_train, params)
-    valid_data = DataSampler(X_valid, y_valid, params)
     
     # Build models
     ae = AutoEncoder(params)
@@ -84,7 +151,8 @@ def train_fader_network(X_train, y_train, X_valid, y_valid, params):
     ae_optimizer = get_optimizer(ae, params.ae_optimizer)
     dis_optimizer = get_optimizer(lat_dis, params.dis_optimizer) if lat_dis else None
     
-    # Training loop (simplified)
+    # Training loop with observable tracking
+    history = []
     ae.train()
     if lat_dis:
         lat_dis.train()
@@ -104,8 +172,8 @@ def train_fader_network(X_train, y_train, X_valid, y_valid, params):
             if lat_dis:
                 z = enc_outputs[-1]
                 preds = lat_dis(z)
-                adv_loss = torch.mean((preds - batch_y)**2)  # MSE for continuous
-                loss += params.lambda_lat_dis * adv_loss
+                adv_loss_batch = torch.mean((preds - batch_y)**2)  # MSE for continuous
+                loss += params.lambda_lat_dis * adv_loss_batch
             
             loss.backward()
             ae_optimizer.step()
@@ -120,22 +188,13 @@ def train_fader_network(X_train, y_train, X_valid, y_valid, params):
                 dis_loss = torch.mean((preds - batch_y)**2)
                 dis_loss.backward()
                 dis_optimizer.step()
+        
+        # Evaluate observables on validation set
+        obs = compute_observables(ae, lat_dis, X_valid, y_valid, U, v, sigma2_y, device)
+        obs['epoch'] = epoch
+        history.append(obs)
     
-    # Evaluate on validation
-    ae.eval()
-    with torch.no_grad():
-        X_valid = X_valid.to(device)
-        y_valid = y_valid.to(device)
-        enc_outputs, dec_outputs = ae(X_valid, y_valid)
-        rec_loss = torch.mean((dec_outputs[-1] - X_valid)**2).item()
-        if lat_dis:
-            z = enc_outputs[-1]
-            preds = lat_dis(z)
-            adv_loss = torch.mean((preds - y_valid)**2).item()
-        else:
-            adv_loss = 0.0
-    
-    return {'rec_loss': rec_loss, 'adv_loss': adv_loss}
+    return history
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -155,12 +214,19 @@ def main():
     parser.add_argument('--epoch_size', type=int, default=500)
     parser.add_argument('--lambda_ae', type=float, default=1.0)
     parser.add_argument('--lambda_lat_dis', type=float, default=0.5, help='Fixed for eigenvalue sweep')
+    parser.add_argument('--out_dir', type=str, default='results', help='Output directory for results')
     args = parser.parse_args()
     
-    # Generate dataset
-    print("Generating continuous dataset...")
+    # Create output directory
+    os.makedirs(args.out_dir, exist_ok=True)
+    
+    # Generate base dataset with fixed eigenvalues
+    print("Generating base dataset...")
     X_train, y_train = generate_continuous_dataset(args.n_samples, args.n, args.r, [4.0, 1.0, 0.25], args.sigma2_y, args.eta)
     X_valid, y_valid = generate_continuous_dataset(args.n_valid, args.n, args.r, [4.0, 1.0, 0.25], args.sigma2_y, args.eta)
+    
+    # Also generate teacher parameters for observables computation
+    U, v, lam, Sxx, Sxy = build_teacher(args.n, args.r, [4.0, 1.0, 0.25], args.sigma2_y, args.eta)
     
     # Base params
     params = argparse.Namespace(
@@ -182,16 +248,21 @@ def main():
         cuda=torch.cuda.is_available()
     )
     
-    # Sweep 1: lambda_lat_dis
+    # Sweep 1: lambda_lat_dis (with fixed eigenvalues)
     lambda_vals = [0.001, 0.05, 0.5, 2.0, 10.0]
-    print(f"\nSweep 1: lambda_lat_dis ∈ {lambda_vals}")
+    print(f"\n{'='*70}")
+    print(f"Sweep 1: lambda_lat_dis ∈ {lambda_vals} (fixed Λ=[4, 1, 0.25])")
+    print(f"{'='*70}")
+    results_sweep1 = {}
     for lam in lambda_vals:
         params.lambda_lat_dis = lam
         print(f"  lambda_lat_dis={lam:.4g} …", end='', flush=True)
-        metrics = train_fader_network(X_train, y_train, X_valid, y_valid, params)
-        print(f"  rec={metrics['rec_loss']:.3f}  adv={metrics['adv_loss']:.3f}")
+        history = train_fader_network(X_train, y_train, X_valid, y_valid, U, v, args.sigma2_y, params)
+        results_sweep1[lam] = history
+        h = history[-1]
+        print(f"  final_rec={h['rec_loss']:.3f}  adv={h['adv_loss']:.3f}")
     
-    # Sweep 2: Eigenvalues
+    # Sweep 2: Eigenvalues (with fixed lambda_lat_dis)
     eigenvalue_configs = {
         'flat  [1,1,1]': [1.0, 1.0, 1.0],
         'mild  [2,1,0.5]': [2.0, 1.0, 0.5],
@@ -199,13 +270,53 @@ def main():
         'steep [8,1,0.125]': [8.0, 1.0, 0.125],
         'single[4,0.1,0.01]': [4.0, 0.1, 0.01],
     }
-    print(f"\nSweep 2: Λ configs (lambda_lat_dis={args.lambda_lat_dis})")
+    print(f"\n{'='*70}")
+    print(f"Sweep 2: Eigenvalue configs (lambda_lat_dis={args.lambda_lat_dis})")
+    print(f"{'='*70}")
+    results_sweep2 = {}
     for lbl, lam_sig in eigenvalue_configs.items():
-        X_train, y_train = generate_continuous_dataset(args.n_samples, args.n, args.r, lam_sig, args.sigma2_y, args.eta)
-        X_valid, y_valid = generate_continuous_dataset(args.n_valid, args.n, args.r, lam_sig, args.sigma2_y, args.eta)
+        # Regenerate dataset for this eigenvalue config
+        X_train_eig, y_train_eig = generate_continuous_dataset(args.n_samples, args.n, args.r, lam_sig, args.sigma2_y, args.eta)
+        X_valid_eig, y_valid_eig = generate_continuous_dataset(args.n_valid, args.n, args.r, lam_sig, args.sigma2_y, args.eta)
+        
+        # Regenerate teacher for this eigenvalue config
+        U_eig, v_eig, lam_eig, _, _ = build_teacher(args.n, args.r, lam_sig, args.sigma2_y, args.eta)
+        
         print(f"  {lbl} …", end='', flush=True)
-        metrics = train_fader_network(X_train, y_train, X_valid, y_valid, params)
-        print(f"  rec={metrics['rec_loss']:.3f}  adv={metrics['adv_loss']:.3f}")
+        history = train_fader_network(X_train_eig, y_train_eig, X_valid_eig, y_valid_eig, U_eig, v_eig, args.sigma2_y, params)
+        results_sweep2[lbl] = history
+        h = history[-1]
+        print(f"  final_rec={h['rec_loss']:.3f}  signal={h['signal_capture']:.3f}")
+    
+    # Save results as pickle
+    results = {
+        'sweep1_lambda': results_sweep1,
+        'sweep2_eigenvalues': results_sweep2,
+        'params': vars(params),
+    }
+    
+    results_file = os.path.join(args.out_dir, 'route_b_observables.pkl')
+    with open(results_file, 'wb') as f:
+        pickle.dump(results, f)
+    print(f"\n✅ Results saved to {results_file}")
+    
+    # Print summary table
+    print(f"\n{'='*90}")
+    print(f"{'Sweep':<30} {'Recon':>10} {'Adv':>10} {'Overlap':>10} {'Signal':>10} {'NuisCode':>10}")
+    print('-'*90)
+    print("λ_lat_dis sweep:")
+    for lam in sorted(results_sweep1.keys()):
+        hist = results_sweep1[lam]
+        h = hist[-1]
+        print(f"  λ={lam:<15.4g}   {h['rec_loss']:>10.3f} {h['adv_loss']:>10.3f} "
+              f"{h['nuisance_overlap']:>10.3f} {h['signal_capture']:>10.3f} {h['nuisance_in_code']:>10.3f}")
+    print("Eigenvalue sweep:")
+    for lbl in eigenvalue_configs.keys():
+        hist = results_sweep2[lbl]
+        h = hist[-1]
+        print(f"  {lbl:<28} {h['rec_loss']:>10.3f} {h['adv_loss']:>10.3f} "
+              f"{h['nuisance_overlap']:>10.3f} {h['signal_capture']:>10.3f} {h['nuisance_in_code']:>10.3f}")
+    print('='*90)
 
 
 if __name__ == '__main__':
