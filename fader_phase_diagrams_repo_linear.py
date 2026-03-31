@@ -11,7 +11,6 @@ For each (x, y) point in the 2D sweep:
 """
 
 import argparse
-import os
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from types import SimpleNamespace
@@ -27,6 +26,9 @@ import matplotlib.colors as mcolors
 
 from src.model import AutoEncoder, LatentDiscriminator
 from src.branch_b_observables import compute_branch_b_observables
+from src.loader import DataSampler
+from src.training import Trainer
+from src.model import sequence_reconstruction_loss
 
 
 # -----------------------------------------------------------------------------
@@ -65,13 +67,15 @@ H_DIRECTION = np.array([0.5, 0.5, 0.0], dtype=float)
 H_DIRECTION = H_DIRECTION / max(np.linalg.norm(H_DIRECTION), 1e-12)
 
 TRAIN_CONFIG = {
-    "n_epochs": 200,
-    "max_epochs": 500,
+    "n_epochs": 5000,
+    "max_epochs": 10000,
     "batch_size": 64,
     "epoch_size": 1024,
     "n_samples": 4096,
     "n_valid": 256,
     "learning_rate": 0.001,
+    "lambda_schedule": 50000,
+    "n_lat_dis": 1,
 }
 
 CONVERGENCE_CONFIG = {
@@ -79,7 +83,7 @@ CONVERGENCE_CONFIG = {
     "min_epochs": 40,
     "rel_improve_tol": 0.02,
     "stability_tol": 0.05,
-    "check_every": 1,
+    "check_every": 5,
 }
 
 OUT_2D = "phase_diagram_repo_linear_fader.png"
@@ -151,22 +155,10 @@ def generate_dataset(n_samples, n, r, lam_sig, noise_total, h_scale, seed=0):
 # REPO LINEAR FADER
 # -----------------------------------------------------------------------------
 
-def make_repo_linear_fader(device):
+def make_repo_linear_fader(model_params, device):
     """Instantiate repository models in strict linear mode."""
-    params = SimpleNamespace(
-        seq_len=N_DIM,
-        x_type="continuous",
-        n_attr=1,
-        label_type="continuous",
-        encoder_hidden_dims=[D_DIM],
-        decoder_hidden_dims=[],
-        dis_hidden_dims=[],
-        hid_dim=D_DIM,
-        n_amino=0,
-    )
-
-    ae = AutoEncoder(params).to(device)
-    lat_dis = LatentDiscriminator(params).to(device)
+    ae = AutoEncoder(model_params).to(device)
+    lat_dis = LatentDiscriminator(model_params).to(device)
 
     # Force exact linear structure for theory mapping:
     # z = W x, x_hat = [A b] [z;y], y_hat = C z
@@ -214,24 +206,68 @@ def extract_linear_matrices(ae, lat_dis, device):
     )
 
 
+def build_trainer_params(config, lambda_reg, lambda_C, eta_clf, alpha_C, use_cuda):
+    """
+    Build a params namespace compatible with repository Trainer.
+    eta_clf is interpreted as the final lambda_lat_dis value (t -> large).
+    """
+    lr = float(config["learning_rate"])
+    dis_lr = lr * float(alpha_C)
+    lambda_schedule = int(config.get("lambda_schedule", 0))
+    if lambda_schedule <= 0:
+        # Reach plateau at 1/3 of target epochs, then stay constant.
+        n_batches = max(1, config["epoch_size"] // config["batch_size"])
+        lambda_schedule = int(max(1, (config["n_epochs"] * n_batches) // 3))
+
+    return SimpleNamespace(
+        # Model structure
+        seq_len=N_DIM,
+        x_type="continuous",
+        n_attr=1,
+        label_type="continuous",
+        encoder_hidden_dims=[D_DIM],
+        decoder_hidden_dims=[],
+        dis_hidden_dims=[],
+        hid_dim=D_DIM,
+        n_amino=0,
+        # Trainer / optimization
+        batch_size=int(config["batch_size"]),
+        epoch_size=int(config["epoch_size"]),
+        n_epochs=int(config["n_epochs"]),
+        max_epochs=int(config.get("max_epochs", config["n_epochs"])),
+        cuda=bool(use_cuda),
+        ae_optimizer=f"adam,lr={lr},weight_decay={float(lambda_reg)}",
+        dis_optimizer=f"adam,lr={dis_lr},weight_decay={float(lambda_C)}",
+        clip_grad_norm=0.0,
+        n_lat_dis=int(config.get("n_lat_dis", 1)),
+        n_ptc_dis=0,
+        n_clf_dis=0,
+        lambda_ae=1.0,
+        lambda_lat_dis=float(eta_clf),
+        lambda_ptc_dis=0.0,
+        lambda_clf_dis=0.0,
+        lambda_schedule=lambda_schedule,
+        label_noise=0.1,
+        smooth_label=0.0,
+        ae_reload="",
+        lat_dis_reload="",
+        clf_dis_reload="",
+        eval_clf=0,
+        n_total_iter=0,
+    )
+
+
 def train_repo_linear_fader(X_train, y_train, lambda_reg, lambda_C, alpha_C, eta_clf, config, device, conv_config=None):
-    ae, lat_dis = make_repo_linear_fader(device)
+    use_cuda = (device.type == "cuda")
+    train_params = build_trainer_params(config, lambda_reg, lambda_C, eta_clf, alpha_C, use_cuda)
+    ae, lat_dis = make_repo_linear_fader(train_params, device)
 
-    ae_params = [p for p in ae.parameters() if p.requires_grad]
-    clf_params = [p for p in lat_dis.parameters() if p.requires_grad]
+    train_data = DataSampler(X_train, y_train, train_params)
+    trainer = Trainer(ae, lat_dis, None, None, train_data, train_params)
 
-    lr = config["learning_rate"]
-    opt_ae = torch.optim.Adam(ae_params, lr=lr)
-    opt_clf = torch.optim.Adam(clf_params, lr=lr * alpha_C)
-
-    X_train = X_train.to(device)
-    y_train = y_train.to(device)
-
-    n_batches = config["epoch_size"] // config["batch_size"]
-    epoch_losses = []
-
-    target_epochs = int(config["n_epochs"])
-    max_epochs = int(config.get("max_epochs", target_epochs))
+    n_batches = max(1, train_params.epoch_size // train_params.batch_size)
+    target_epochs = int(train_params.n_epochs)
+    max_epochs = int(train_params.max_epochs)
 
     conv_cfg = conv_config if conv_config is not None else CONVERGENCE_CONFIG
     win = conv_cfg["window"]
@@ -240,53 +276,27 @@ def train_repo_linear_fader(X_train, y_train, lambda_reg, lambda_C, alpha_C, eta
     stab_tol = conv_cfg["stability_tol"]
     check_every = max(int(conv_cfg.get("check_every", 1)), 1)
 
+    epoch_losses = []
     converged = False
     rel_improve = np.inf
     stability = np.inf
     epochs_run = 0
 
+    X_val_ref = X_train[: min(512, X_train.size(0))].to(device)
+    y_val_ref = y_train[: min(512, y_train.size(0))].to(device)
+
     for epoch_idx in range(max_epochs):
-        loss_acc = 0.0
-        for _ in range(n_batches):
-            idx = np.random.choice(len(X_train), config["batch_size"], replace=False)
-            batch_x = X_train[idx]
-            batch_y = y_train[idx]
+        for n_iter in range(n_batches):
+            for _ in range(train_params.n_lat_dis):
+                trainer.lat_dis_step()
+            trainer.autoencoder_step()
+            trainer.step(n_iter)
 
-            # 1) Classifier step: update C only
-            opt_clf.zero_grad()
-            with torch.no_grad():
-                z_det = ae.encode(batch_x)[-1]
-            y_hat_clf = lat_dis(z_det)
-            clf_loss = torch.mean((y_hat_clf - batch_y) ** 2)
-            _, _, _, C = extract_linear_matrices(ae, lat_dis, device)
-            clf_reg = lambda_C * (torch.norm(C) ** 2)
-            loss_clf = clf_loss + clf_reg
-            loss_clf.backward()
-            opt_clf.step()
-
-            # 2) Fader step: update W, A, b only
-            for p in lat_dis.parameters():
-                p.requires_grad_(False)
-            opt_ae.zero_grad()
-            enc_outputs, dec_outputs = ae(batch_x, batch_y)
-            z = enc_outputs[-1]
-            x_hat = dec_outputs[-1]
-            y_hat_adv = lat_dis(z)
-
-            rec_loss = torch.mean((x_hat - batch_x) ** 2)
-            adv_loss = torch.mean((y_hat_adv - batch_y) ** 2)
-
-            W, A, b, _ = extract_linear_matrices(ae, lat_dis, device)
-            reg_wa = lambda_reg * (torch.norm(W) ** 2 + torch.norm(A) ** 2 + torch.norm(b) ** 2)
-            loss_ae = rec_loss - eta_clf * adv_loss + reg_wa
-            loss_ae.backward()
-            opt_ae.step()
-            for p in lat_dis.parameters():
-                p.requires_grad_(True)
-
-            loss_acc += float(loss_ae.item())
-
-        epoch_losses.append(loss_acc / max(n_batches, 1))
+        ae.eval()
+        with torch.no_grad():
+            _, dec_outputs = ae(X_val_ref, y_val_ref)
+            val_rec = sequence_reconstruction_loss(dec_outputs[-1], X_val_ref, x_type="continuous").item()
+        epoch_losses.append(float(val_rec))
         epochs_run = epoch_idx + 1
 
         ready_for_conv = epochs_run >= max(2 * win, min_epochs)
@@ -302,7 +312,6 @@ def train_repo_linear_fader(X_train, y_train, lambda_reg, lambda_C, alpha_C, eta
             if converged:
                 break
 
-    # Final convergence report if not already converged.
     if (not converged) and len(epoch_losses) >= max(2 * win, min_epochs):
         prev = np.array(epoch_losses[-2 * win:-win], dtype=float)
         last = np.array(epoch_losses[-win:], dtype=float)
@@ -434,10 +443,11 @@ def _train_one_config(task):
 
     # Isolate each worker to one GPU when CUDA is used.
     if use_cuda:
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-        device = torch.device("cuda:0")
+        if gpu_id < 0:
+            raise RuntimeError("GPU mode enabled but received invalid gpu_id.")
+        device = torch.device(f"cuda:{gpu_id}")
         if torch.cuda.is_available():
-            torch.cuda.set_device(0)
+            torch.cuda.set_device(gpu_id)
     else:
         device = torch.device("cpu")
 
@@ -752,6 +762,8 @@ def main():
         workers = len(gpu_ids)
     else:
         workers = args.workers
+    if device.type == "cuda":
+        workers = min(max(1, int(workers)), len(gpu_ids))
 
     out = run_2d_sweep(device, num_workers=workers, gpu_ids=gpu_ids)
     vals_x, vals_y, phase_grid, M_grid, N_grid, rho_grid, rec_grid, converged_grid, rel_improve_grid, stability_grid, epochs_grid = out
