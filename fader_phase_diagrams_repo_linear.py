@@ -53,7 +53,7 @@ SWEEP_RANGES = {
 }
 
 FIXED_VALUES = {
-    "noise_total": 2.0,
+    "noise_total": 0.1,
     "lambda_reg":  0.1,
     "lam_sig":     1.0,
     "lambda_C":    0.01,
@@ -71,7 +71,7 @@ TRAIN_CONFIG = {
     "max_epochs": 10000,
     "batch_size": 64,
     "epoch_size": 1024,
-    "n_samples": 4096,
+    "n_samples": 50000,
     "n_valid": 256,
     "learning_rate": 0.001,
     "lambda_schedule": 50000,
@@ -408,13 +408,17 @@ def extract_observables_repo(ae, lat_dis, X_valid, y_valid, U, v, lam, g, eta, d
         s_norm = float(torch.norm(obs["s"]).item())
         a_norm = float(torch.norm(obs["a"]).item())
         beta_norm = float(torch.norm(obs["beta"]).item())
+        b_norm = float(torch.norm(b).item())
+        denom = max(b_norm, 1e-8)
+        rho_norm = rho / denom
+        beta_norm_scaled = beta_norm / denom
 
         X_valid_t = X_valid.to(device)
         y_valid_t = y_valid.to(device)
         x_hat = ae(X_valid_t, y_valid_t)[1][-1]
         rec_loss = torch.mean((x_hat - X_valid_t) ** 2).item()
 
-    return M_tilde, N_tilde, rho, s_norm, a_norm, beta_norm, rec_loss
+    return M_tilde, N_tilde, rho_norm, s_norm, a_norm, beta_norm_scaled, rec_loss
 
 
 # -----------------------------------------------------------------------------
@@ -634,7 +638,7 @@ def plot_2d(vals_x, vals_y, phase_grid, M_grid, N_grid, rho_grid, rec_grid, conv
     for idx, (data, title, cmap) in enumerate([
         (M_grid, "||M|| / sqrt(tr(Q))", "plasma"),
         (N_grid, "||N|| / sqrt(tr(Q))", "cividis"),
-        (rho_grid, "rho (label alignment)", "coolwarm"),
+        (rho_grid, "rho / ||b||  (normalized alignment)", "coolwarm"),
         (rec_grid, "Reconstruction error", "viridis"),
     ], 1):
         ax = axes[idx]
