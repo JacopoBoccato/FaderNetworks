@@ -1,0 +1,59 @@
+#!/bin/bash
+#PBS -N FaderRepoLinearSweep
+#PBS -o FaderRepoLinearSweep_output.log
+#PBS -e FaderRepoLinearSweep_error.log
+#PBS -m a
+#PBS -M jacopo.boccato@gmail.com
+#PBS -l select=1:ncpus=20:ngpus=4
+#PBS -l walltime=06:00:00
+
+set -euo pipefail
+
+# Go to repository root (assumes qsub launched from jobs/)
+cd "$PBS_O_WORKDIR/.."
+
+module purge
+# Adjust CUDA module name/version to your cluster if needed
+module load cuda/12.2 || true
+
+source /home/ipht/jboccato/miniconda/etc/profile.d/conda.sh
+conda activate fader_env
+
+mkdir -p logs
+mkdir -p .mplcache
+
+export NCPUS="${PBS_NCPUS:-20}"
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+export MKL_DYNAMIC=FALSE
+export PYTHONUNBUFFERED=1
+export MPLCONFIGDIR="$PWD/.mplcache"
+
+# Sweep/training knobs (override with: qsub -v NX=...,NY=...,TARGET_EPOCHS=...,MAX_EPOCHS=...)
+NX="${NX:-15}"
+NY="${NY:-15}"
+TARGET_EPOCHS="${TARGET_EPOCHS:-200}"
+MAX_EPOCHS="${MAX_EPOCHS:-500}"
+WORKERS="${WORKERS:-4}"
+CONV_WINDOW="${CONV_WINDOW:-10}"
+CONV_MIN_EPOCHS="${CONV_MIN_EPOCHS:-40}"
+CONV_REL_TOL="${CONV_REL_TOL:-0.02}"
+CONV_STAB_TOL="${CONV_STAB_TOL:-0.05}"
+CONV_CHECK_EVERY="${CONV_CHECK_EVERY:-1}"
+
+python -u fader_phase_diagrams_repo_linear.py \
+  --device cuda \
+  --workers "$WORKERS" \
+  --nx "$NX" \
+  --ny "$NY" \
+  --n_epochs "$TARGET_EPOCHS" \
+  --max_epochs "$MAX_EPOCHS" \
+  --conv_window "$CONV_WINDOW" \
+  --conv_min_epochs "$CONV_MIN_EPOCHS" \
+  --conv_rel_improve_tol "$CONV_REL_TOL" \
+  --conv_stability_tol "$CONV_STAB_TOL" \
+  --conv_check_every "$CONV_CHECK_EVERY"
+
