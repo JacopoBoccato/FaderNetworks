@@ -1,0 +1,60 @@
+#!/bin/bash
+#PBS -N BranchBCompare
+#PBS -o BranchBCompare_output.log
+#PBS -e BranchBCompare_error.log
+#PBS -m a
+#PBS -M jacopo.boccato@gmail.com
+#PBS -l select=1:ncpus=8:ngpus=1
+#PBS -l walltime=24:00:00
+
+set -euo pipefail
+
+cd "$PBS_O_WORKDIR/.."
+
+module purge
+module load cuda/12.2 || true
+
+source /home/ipht/jboccato/miniconda/etc/profile.d/conda.sh
+conda activate fader_env
+
+mkdir -p logs
+mkdir -p .mplcache
+
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+export MKL_DYNAMIC=FALSE
+export PYTHONUNBUFFERED=1
+export MPLCONFIGDIR="$PWD/.mplcache"
+
+N_EPOCHS="${N_EPOCHS:-50000}"
+N_SAMPLES="${N_SAMPLES:-50000}"
+BATCH_SIZE="${BATCH_SIZE:-16384}"
+LEARNING_RATE="${LEARNING_RATE:-5e-6}"
+THEORY_T_FINAL="${THEORY_T_FINAL:-500}"
+THEORY_POINTS="${THEORY_POINTS:-20000}"
+NOISE_TOTAL="${NOISE_TOTAL:-0.5}"
+LAMBDA_REG="${LAMBDA_REG:-0.1}"
+LAM_SIG="${LAM_SIG:-5.0}"
+LAMBDA_C="${LAMBDA_C:-0.01}"
+ALPHA_C="${ALPHA_C:-1.0}"
+ETA_CLF="${ETA_CLF:-1.0}"
+H_SCALE="${H_SCALE:-1.0}"
+
+python -u compare_branch_b_dynamics.py \
+  --device cuda \
+  --n_epochs "$N_EPOCHS" \
+  --n_samples "$N_SAMPLES" \
+  --batch_size "$BATCH_SIZE" \
+  --learning_rate "$LEARNING_RATE" \
+  --theory_t_final "$THEORY_T_FINAL" \
+  --theory_points "$THEORY_POINTS" \
+  --noise_total "$NOISE_TOTAL" \
+  --lambda_reg "$LAMBDA_REG" \
+  --lam_sig "$LAM_SIG" \
+  --lambda_C "$LAMBDA_C" \
+  --alpha_C "$ALPHA_C" \
+  --eta_clf "$ETA_CLF" \
+  --h_scale "$H_SCALE"
