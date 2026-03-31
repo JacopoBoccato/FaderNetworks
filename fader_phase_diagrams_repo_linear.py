@@ -497,6 +497,7 @@ def _train_one_config(task):
         M_tilde=float(M_tilde),
         N_tilde=float(N_tilde),
         rho=float(rho),
+        s=float(s_norm),
         rec_loss=float(rec_loss),
         converged=bool(conv["converged"]),
         rel_improve=float(conv["rel_improve"]),
@@ -516,7 +517,7 @@ def run_2d_sweep(device, num_workers=1, gpu_ids=None):
     phase_grid = np.empty((ny, nx), dtype=object)
     M_grid = np.zeros((ny, nx))
     N_grid = np.zeros((ny, nx))
-    rho_grid = np.zeros((ny, nx))
+    s_grid = np.zeros((ny, nx))
     rec_grid = np.zeros((ny, nx))
     converged_grid = np.zeros((ny, nx))
     rel_improve_grid = np.full((ny, nx), np.nan)
@@ -568,7 +569,7 @@ def run_2d_sweep(device, num_workers=1, gpu_ids=None):
             phase_grid[j, i] = res["phase"]
             M_grid[j, i] = res["M_tilde"]
             N_grid[j, i] = res["N_tilde"]
-            rho_grid[j, i] = res["rho"]
+            s_grid[j, i] = res["s"]
             rec_grid[j, i] = res["rec_loss"]
             converged_grid[j, i] = 1.0 if res["converged"] else 0.0
             rel_improve_grid[j, i] = res["rel_improve"]
@@ -596,12 +597,12 @@ def run_2d_sweep(device, num_workers=1, gpu_ids=None):
     print(f"Reached max_epochs without convergence: {hit_max_count}/{total}")
 
     return (
-        vals_x, vals_y, phase_grid, M_grid, N_grid, rho_grid, rec_grid,
+        vals_x, vals_y, phase_grid, M_grid, N_grid, s_grid, rec_grid,
         converged_grid, rel_improve_grid, stability_grid, epochs_grid,
     )
 
 
-def plot_2d(vals_x, vals_y, phase_grid, M_grid, N_grid, rho_grid, rec_grid, converged_grid):
+def plot_2d(vals_x, vals_y, phase_grid, M_grid, N_grid, s_grid, rec_grid, converged_grid):
     phase_int = np.vectorize(p2i)(phase_grid)
     present = [p for p in ALL_PHASES if np.any(phase_grid == p)]
     flat = phase_grid.ravel()
@@ -638,14 +639,11 @@ def plot_2d(vals_x, vals_y, phase_grid, M_grid, N_grid, rho_grid, rec_grid, conv
     for idx, (data, title, cmap) in enumerate([
         (M_grid, "||M|| / sqrt(tr(Q))", "plasma"),
         (N_grid, "||N|| / sqrt(tr(Q))", "cividis"),
-        (rho_grid, "rho / ||b||  (normalized alignment)", "coolwarm"),
+        (s_grid, "||s||", "coolwarm"),
         (rec_grid, "Reconstruction error", "viridis"),
     ], 1):
         ax = axes[idx]
-        if title == "rho (label alignment)":
-            im = ax.pcolormesh(vals_x, vals_y, data, cmap=cmap, vmin=0, vmax=1, shading="nearest")
-        else:
-            im = ax.pcolormesh(vals_x, vals_y, data, cmap=cmap, shading="nearest")
+        im = ax.pcolormesh(vals_x, vals_y, data, cmap=cmap, shading="nearest")
         sax(ax)
         ax.set_xlabel(SWEEP_X, color="white", fontsize=10.5)
         ax.set_ylabel(SWEEP_Y, color="white", fontsize=10.5)
@@ -770,9 +768,9 @@ def main():
         workers = min(max(1, int(workers)), len(gpu_ids))
 
     out = run_2d_sweep(device, num_workers=workers, gpu_ids=gpu_ids)
-    vals_x, vals_y, phase_grid, M_grid, N_grid, rho_grid, rec_grid, converged_grid, rel_improve_grid, stability_grid, epochs_grid = out
+    vals_x, vals_y, phase_grid, M_grid, N_grid, s_grid, rec_grid, converged_grid, rel_improve_grid, stability_grid, epochs_grid = out
 
-    plot_2d(vals_x, vals_y, phase_grid, M_grid, N_grid, rho_grid, rec_grid, converged_grid)
+    plot_2d(vals_x, vals_y, phase_grid, M_grid, N_grid, s_grid, rec_grid, converged_grid)
 
     np.savez(
         OUT_DATA,
@@ -780,7 +778,7 @@ def main():
         vals_y=vals_y,
         M_grid=M_grid,
         N_grid=N_grid,
-        rho_grid=rho_grid,
+        s_grid=s_grid,
         rec_grid=rec_grid,
         converged_grid=converged_grid,
         rel_improve_grid=rel_improve_grid,
