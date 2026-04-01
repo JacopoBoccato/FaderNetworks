@@ -12,7 +12,11 @@ This script:
 """
 
 import argparse
+from dataclasses import dataclass
+import os
 from types import SimpleNamespace
+
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
 import numpy as np
 import torch
@@ -37,27 +41,40 @@ H_DIRECTION = np.array([0.5, 0.5, 0.0], dtype=float)
 H_DIRECTION = H_DIRECTION / max(np.linalg.norm(H_DIRECTION), 1e-12)
 ETA_FRACTION = 0.5
 
-FIXED_VALUES = {
-    "noise_total": 0.5,
-    "lambda_reg": 0.1,
-    "lam_sig": 5.0,
-    "lambda_C": 0.01,
-    "alpha_C": 1.0,
-    "eta_clf": 1.0,
-    "h_scale": 1.0,
-}
+@dataclass(frozen=True)
+class ExperimentConfig:
+    # Shared theory / Fader controls.
+    noise_total: float = 0.5
+    lambda_reg: float = 0.5
+    lam_sig: float = 15.0
+    lambda_C: float = 0.1
+    alpha_C: int = 1
+    eta_clf: float = 100.0
+    h_scale: float = 1.0
 
-TRAIN_CONFIG = {
-    "n_epochs": 50000,
-    "n_samples": 50000,
-    "batch_size": 16384,
-    "learning_rate": 5e-6,
-}
+    # Training / measurement controls.
+    n_epochs: int = 1000
+    n_samples: int = 100000
+    batch_size: int = 16384
+    learning_rate: float = 5e-6
+    measure_every_batches: int = 1
+
+    # Theory integration controls.
+    theory_t_final: float = 500.0
+    theory_points: int = 20000
+
+    # Reproducibility / runtime controls.
+    seed: int = 0
+    teacher_seed: int = 0
+    device: str = "cpu"
+
+
+# Edit this block. It is the single source of truth for both the Fader
+# training game and the ODE parameters.
+EXPERIMENT_CONFIG = ExperimentConfig()
 
 OUT_PLOT = "branch_b_theory_vs_training.png"
 OUT_DATA = "branch_b_theory_vs_training.npz"
-THEORY_T_FINAL = 500.0
-THEORY_POINTS = 20000
 
 MAT_DD = D_DIM * D_DIM
 MAT_RD = R_DIM * D_DIM
@@ -65,18 +82,18 @@ VEC_D = D_DIM
 VEC_R = R_DIM
 
 
-def build_params(noise_total, lambda_reg, lam_sig, lambda_C, alpha_C, eta_clf, h_scale):
-    eta = max(ETA_FRACTION * noise_total, 1e-8)
-    g = max((1.0 - ETA_FRACTION) * noise_total, 1e-8)
+def build_shared_params(config):
+    eta = max(ETA_FRACTION * config.noise_total, 1e-8)
+    g = max((1.0 - ETA_FRACTION) * config.noise_total, 1e-8)
     return {
-        "noise_total": noise_total,
-        "lambda_reg": lambda_reg,
-        "lam_sig": lam_sig,
-        "lambda_C": lambda_C,
-        "alpha_C": max(alpha_C, 1e-8),
-        "eta_clf": max(eta_clf, 1e-8),
-        "h_scale": h_scale,
-        "h_vec": h_scale * H_DIRECTION,
+        "noise_total": config.noise_total,
+        "lambda_reg": config.lambda_reg,
+        "lam_sig": config.lam_sig,
+        "lambda_C": config.lambda_C,
+        "alpha_C": max(float(config.alpha_C), 0.0),
+        "eta_clf": max(config.eta_clf, 1e-8),
+        "h_scale": config.h_scale,
+        "h_vec": config.h_scale * H_DIRECTION,
         "eta": eta,
         "g": g,
     }
@@ -99,24 +116,23 @@ def build_teacher(n, r, h_scale, seed=0):
     return U, v
 
 
-def generate_dataset(n_samples, n, r, lam_sig, noise_total, h_scale, seed=0):
-    params = build_params(noise_total, 0.0, lam_sig, 0.0, 1.0, 1.0, h_scale)
-    eta = params["eta"]
-    g = params["g"]
+def generate_dataset(config, shared_params, n, r):
+    eta = shared_params["eta"]
+    g = shared_params["g"]
 
-    U, v = build_teacher(n, r, h_scale, seed=seed)
-    rng = np.random.default_rng(seed)
+    U, v = build_teacher(n, r, config.h_scale, seed=config.teacher_seed)
+    rng = np.random.default_rng(config.teacher_seed)
 
-    c = rng.standard_normal((n_samples, r))
-    y = np.sqrt(g) * rng.standard_normal((n_samples, 1))
-    a = rng.standard_normal((n_samples, n))
+    c = rng.standard_normal((config.n_samples, r))
+    y = np.sqrt(g) * rng.standard_normal((config.n_samples, 1))
+    a = rng.standard_normal((config.n_samples, n))
 
-    c_scaled = np.sqrt(max(lam_sig, 1e-12)) * c
+    c_scaled = np.sqrt(max(shared_params["lam_sig"], 1e-12)) * c
     X = (U @ c_scaled.T).T + (v[:, None] @ y.T).T + np.sqrt(eta) * a
 
     X = torch.tensor(X, dtype=torch.float32)
     y = torch.tensor(y.squeeze(), dtype=torch.float32).unsqueeze(-1)
-    lam = lam_sig * np.ones(r, dtype=float)
+    lam = shared_params["lam_sig"] * np.ones(r, dtype=float)
     return X, y, U, v, lam
 
 
@@ -399,18 +415,27 @@ def compute_measured_observables(ae, lat_dis, X, y, U, v, lam, eta, g, device):
     return observables, rec_loss
 
 
-def train_and_measure(X, y, U, v, lam, params, n_epochs, lr, batch_size, device):
+def train_and_measure(X, y, U, v, lam, params, config, device):
     ae, lat_dis = make_linear_fader(device)
-    ae_opt = torch.optim.SGD([p for p in ae.parameters() if p.requires_grad], lr=lr)
-    c_opt = torch.optim.SGD([p for p in lat_dis.parameters() if p.requires_grad], lr=lr * params["alpha_C"])
+    ae_opt = torch.optim.SGD([p for p in ae.parameters() if p.requires_grad], lr=config.learning_rate)
+    c_opt = torch.optim.SGD([p for p in lat_dis.parameters() if p.requires_grad], lr=config.learning_rate)
 
     X_dev = X.to(device)
     y_dev = y.to(device)
     n_samples = X_dev.size(0)
-    batch_size = min(int(batch_size), n_samples)
+    batch_size = min(int(config.batch_size), n_samples)
+    n_batches_per_epoch = max(int(np.ceil(n_samples / batch_size)), 1)
+    total_joint_updates = max(int(config.n_epochs) * n_batches_per_epoch, 1)
+    measure_every_batches = max(int(config.measure_every_batches), 1)
+    classifier_steps = max(int(config.alpha_C), 0)
+
+    # Use one effective dt per joint classifier/autoencoder update so the
+    # measured trajectory ends at the same horizon as the ODE integration.
+    matched_dt = float(config.theory_t_final) / total_joint_updates
 
     measured = []
     times = [0.0]
+    sgd_times = [0.0]
 
     initial_obs, initial_rec = compute_measured_observables(
         ae, lat_dis, X, y, U, v, lam, params["eta"], params["g"], device
@@ -418,23 +443,27 @@ def train_and_measure(X, y, U, v, lam, params, n_epochs, lr, batch_size, device)
     measured.append(scalarize_observables(initial_obs, initial_rec))
 
     elapsed_time = 0.0
-    for epoch in range(1, n_epochs + 1):
+    elapsed_sgd_time = 0.0
+    total_batches_seen = 0
+    for epoch in range(1, config.n_epochs + 1):
         perm = torch.randperm(n_samples, device=X_dev.device)
-        n_batches = 0
         for start in range(0, n_samples, batch_size):
             idx = perm[start:start + batch_size]
             batch_x = X_dev[idx]
             batch_y = y_dev[idx]
 
-            # Full classifier pressure from the first update; no schedule or warmup.
-            c_opt.zero_grad()
             with torch.no_grad():
                 z_det = ae.encode(batch_x)[-1]
-            y_hat = lat_dis(z_det)
-            _, _, _, C = extract_linear_matrices(ae, lat_dis, device)
-            loss_c = params["eta_clf"] * torch.mean((y_hat - batch_y) ** 2) + params["lambda_C"] * (torch.norm(C) ** 2)
-            loss_c.backward()
-            c_opt.step()
+            for _ in range(classifier_steps):
+                c_opt.zero_grad()
+                y_hat = lat_dis(z_det)
+                _, _, _, C = extract_linear_matrices(ae, lat_dis, device)
+                loss_c = (
+                    params["eta_clf"] * torch.mean((y_hat - batch_y) ** 2)
+                    + params["lambda_C"] * (torch.norm(C) ** 2)
+                )
+                loss_c.backward()
+                c_opt.step()
 
             ae_opt.zero_grad()
             enc_outputs, dec_outputs = ae(batch_x, batch_y)
@@ -448,14 +477,39 @@ def train_and_measure(X, y, U, v, lam, params, n_epochs, lr, batch_size, device)
             loss_ae = rec_loss - params["eta_clf"] * adv_loss + reg
             loss_ae.backward()
             ae_opt.step()
-            n_batches += 1
+            total_batches_seen += 1
+            elapsed_time += matched_dt
+            elapsed_sgd_time += config.learning_rate
 
-        obs, rec = compute_measured_observables(ae, lat_dis, X, y, U, v, lam, params["eta"], params["g"], device)
-        measured.append(scalarize_observables(obs, rec))
-        elapsed_time += lr * max(n_batches, 1)
-        times.append(elapsed_time)
+            if (
+                total_batches_seen % measure_every_batches == 0
+                or total_batches_seen == total_joint_updates
+            ):
+                obs, rec = compute_measured_observables(
+                    ae,
+                    lat_dis,
+                    X,
+                    y,
+                    U,
+                    v,
+                    lam,
+                    params["eta"],
+                    params["g"],
+                    device,
+                )
+                measured.append(scalarize_observables(obs, rec))
+                times.append(elapsed_time)
+                sgd_times.append(elapsed_sgd_time)
 
-    return ae, lat_dis, np.asarray(times, dtype=float), measured, observables_to_state(initial_obs)
+    return (
+        ae,
+        lat_dis,
+        np.asarray(times, dtype=float),
+        np.asarray(sgd_times, dtype=float),
+        measured,
+        observables_to_state(initial_obs),
+        float(matched_dt),
+    )
 
 
 def plot_comparison(times, theory_times_dense, theory_hist_dense, measured_hist, params, out_file):
@@ -498,99 +552,107 @@ def plot_comparison(times, theory_times_dense, theory_hist_dense, measured_hist,
         "Branch-B Theory vs Measured Linear Fader Dynamics\n"
         f"noise_total={params['noise_total']}, lambda_reg={params['lambda_reg']}, "
         f"lam_sig={params['lam_sig']}, lambda_C={params['lambda_C']}, "
-        f"alpha_C={params['alpha_C']}, eta_clf={params['eta_clf']}, h_scale={params['h_scale']}",
+        f"alpha_C={params['alpha_C']} clf steps/AE step, "
+        f"eta_clf={params['eta_clf']}, h_scale={params['h_scale']}",
         fontsize=12,
     )
     fig.tight_layout()
     fig.savefig(out_file, dpi=160, bbox_inches="tight")
 
 
-def main():
+def parse_config():
+    base = EXPERIMENT_CONFIG
     parser = argparse.ArgumentParser(description="Compare Branch-B ODE against trained linear Fader observables.")
-    parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"])
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--teacher_seed", type=int, default=0)
-    parser.add_argument("--n_epochs", type=int, default=TRAIN_CONFIG["n_epochs"])
-    parser.add_argument("--n_samples", type=int, default=TRAIN_CONFIG["n_samples"])
-    parser.add_argument("--batch_size", type=int, default=TRAIN_CONFIG["batch_size"])
-    parser.add_argument("--learning_rate", type=float, default=TRAIN_CONFIG["learning_rate"])
-    parser.add_argument("--theory_t_final", type=float, default=THEORY_T_FINAL)
-    parser.add_argument("--theory_points", type=int, default=THEORY_POINTS)
-    parser.add_argument("--noise_total", type=float, default=FIXED_VALUES["noise_total"])
-    parser.add_argument("--lambda_reg", type=float, default=FIXED_VALUES["lambda_reg"])
-    parser.add_argument("--lam_sig", type=float, default=FIXED_VALUES["lam_sig"])
-    parser.add_argument("--lambda_C", type=float, default=FIXED_VALUES["lambda_C"])
-    parser.add_argument("--alpha_C", type=float, default=FIXED_VALUES["alpha_C"])
-    parser.add_argument("--eta_clf", type=float, default=FIXED_VALUES["eta_clf"])
-    parser.add_argument("--h_scale", type=float, default=FIXED_VALUES["h_scale"])
+    parser.add_argument("--device", type=str, default=base.device, choices=["cpu", "cuda"])
+    parser.add_argument("--seed", type=int, default=base.seed)
+    parser.add_argument("--teacher_seed", type=int, default=base.teacher_seed)
+    parser.add_argument("--n_epochs", type=int, default=base.n_epochs)
+    parser.add_argument("--n_samples", type=int, default=base.n_samples)
+    parser.add_argument("--batch_size", type=int, default=base.batch_size)
+    parser.add_argument("--learning_rate", type=float, default=base.learning_rate)
+    parser.add_argument("--measure_every_batches", type=int, default=base.measure_every_batches)
+    parser.add_argument("--theory_t_final", type=float, default=base.theory_t_final)
+    parser.add_argument("--theory_points", type=int, default=base.theory_points)
+    parser.add_argument("--noise_total", type=float, default=base.noise_total)
+    parser.add_argument("--lambda_reg", type=float, default=base.lambda_reg)
+    parser.add_argument("--lam_sig", type=float, default=base.lam_sig)
+    parser.add_argument("--lambda_C", type=float, default=base.lambda_C)
+    parser.add_argument("--alpha_C", type=int, default=base.alpha_C)
+    parser.add_argument("--eta_clf", type=float, default=base.eta_clf)
+    parser.add_argument("--h_scale", type=float, default=base.h_scale)
     parser.add_argument("--out_plot", type=str, default=OUT_PLOT)
     parser.add_argument("--out_data", type=str, default=OUT_DATA)
     args = parser.parse_args()
+    config = ExperimentConfig(
+        noise_total=args.noise_total,
+        lambda_reg=args.lambda_reg,
+        lam_sig=args.lam_sig,
+        lambda_C=args.lambda_C,
+        alpha_C=args.alpha_C,
+        eta_clf=args.eta_clf,
+        h_scale=args.h_scale,
+        n_epochs=args.n_epochs,
+        n_samples=args.n_samples,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        measure_every_batches=args.measure_every_batches,
+        theory_t_final=args.theory_t_final,
+        theory_points=args.theory_points,
+        seed=args.seed,
+        teacher_seed=args.teacher_seed,
+        device=args.device,
+    )
+    return config, args.out_plot, args.out_data
 
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
 
-    if args.device == "cuda" and torch.cuda.is_available():
+def main():
+    config, out_plot, out_data = parse_config()
+
+    np.random.seed(config.seed)
+    torch.manual_seed(config.seed)
+
+    if config.device == "cuda" and torch.cuda.is_available():
         device = torch.device("cuda")
     else:
         device = torch.device("cpu")
 
-    params = build_params(
-        args.noise_total,
-        args.lambda_reg,
-        args.lam_sig,
-        args.lambda_C,
-        args.alpha_C,
-        args.eta_clf,
-        args.h_scale,
-    )
+    params = build_shared_params(config)
+    X, y, U, v, lam = generate_dataset(config, params, N_DIM, R_DIM)
 
-    X, y, U, v, lam = generate_dataset(
-        args.n_samples,
-        N_DIM,
-        R_DIM,
-        params["lam_sig"],
-        params["noise_total"],
-        params["h_scale"],
-        seed=args.teacher_seed,
-    )
-
-    _, _, times, measured_list, x0 = train_and_measure(
+    _, _, times, sgd_times, measured_list, x0, matched_dt = train_and_measure(
         X,
         y,
         U,
         v,
         lam,
         params,
-        n_epochs=args.n_epochs,
-        lr=args.learning_rate,
-        batch_size=args.batch_size,
+        config,
         device=device,
     )
 
-    theory_t_final = max(float(args.theory_t_final), float(times[-1]))
-    theory_times_dense = np.linspace(0.0, theory_t_final, int(args.theory_points))
+    theory_t_final = float(times[-1])
+    theory_times_dense = np.linspace(0.0, theory_t_final, int(config.theory_points))
     theory_states_dense = integrate_theory(x0, params, theory_times_dense)
     theory_list_dense = [scalarize_state(x, params) for x in theory_states_dense]
 
     keys = list(measured_list[0].keys())
     measured_hist = {k: np.array([row[k] for row in measured_list], dtype=float) for k in keys}
     theory_hist_dense = {k: np.array([row[k] for row in theory_list_dense], dtype=float) for k in keys}
+    theory_hist = {k: np.interp(times, theory_times_dense, theory_hist_dense[k]) for k in keys}
 
-    # Resample long-horizon theory onto measured checkpoints for direct overlay.
-    theory_hist = {
-        k: np.interp(times, theory_times_dense, theory_hist_dense[k]) for k in keys
-    }
-
-    plot_comparison(times, theory_times_dense, theory_hist_dense, measured_hist, params, args.out_plot)
+    plot_comparison(times, theory_times_dense, theory_hist_dense, measured_hist, params, out_plot)
 
     np.savez(
-        args.out_data,
+        out_data,
         times=times,
+        times_sgd=sgd_times,
         theory_times_dense=theory_times_dense,
         **{f"measured_{k}": v for k, v in measured_hist.items()},
         **{f"theory_{k}": v for k, v in theory_hist.items()},
         **{f"theory_dense_{k}": v for k, v in theory_hist_dense.items()},
+        matched_dt=matched_dt,
+        raw_sgd_dt=config.learning_rate,
+        measure_every_batches=config.measure_every_batches,
         noise_total=params["noise_total"],
         lambda_reg=params["lambda_reg"],
         lam_sig=params["lam_sig"],
@@ -601,8 +663,9 @@ def main():
         eta=params["eta"],
         g=params["g"],
     )
-    print(f"Saved -> {args.out_plot}")
-    print(f"Saved -> {args.out_data}")
+    print(f"Shared config -> {config}")
+    print(f"Saved -> {out_plot}")
+    print(f"Saved -> {out_data}")
 
 
 if __name__ == "__main__":
