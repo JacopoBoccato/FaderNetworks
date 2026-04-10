@@ -65,7 +65,6 @@ class ExperimentConfig:
     lambda_schedule: int = 0
 
     # Theory integration controls.
-    theory_t_final: float = 50.0
     theory_points: int = 4000
 
     # Reproducibility / runtime controls.
@@ -93,6 +92,7 @@ def build_shared_params(config):
     g = max((1.0 - ETA_FRACTION) * config.noise_total, 1e-8)
     return {
         "noise_total": config.noise_total,
+        "learning_rate": config.learning_rate,
         "lambda_reg": config.lambda_reg,
         "lam_sig": config.lam_sig,
         "lambda_C": config.lambda_C,
@@ -491,10 +491,11 @@ def train_and_measure(X, y, U, v, lam, params, config, device):
     total_joint_updates = max(int(config.n_epochs) * n_batches_per_epoch, 1)
     measure_every_batches = max(int(config.measure_every_batches), 1)
 
-    # Use one effective dt per joint classifier/autoencoder update so the
-    # measured trajectory ends at the same horizon as the ODE integration.
-    matched_dt = float(config.theory_t_final) / total_joint_updates
-    gamma_schedule_time = matched_dt * float(getattr(trainer_params, "lambda_schedule", 0))
+    # Match the ODE clock to SGD time: one joint update advances continuous
+    # time by the learning rate, so one ODE unit corresponds to 1 / lr joint
+    # updates of the microscopic Fader game.
+    joint_update_dt = float(config.learning_rate)
+    gamma_schedule_time = joint_update_dt * float(getattr(trainer_params, "lambda_schedule", 0))
 
     measured = []
     times = [0.0]
@@ -509,7 +510,6 @@ def train_and_measure(X, y, U, v, lam, params, config, device):
     measured.append(scalarize_observables(initial_obs, initial_rec))
 
     elapsed_time = 0.0
-    elapsed_sgd_time = 0.0
     total_batches_seen = 0
     for epoch in range(1, config.n_epochs + 1):
         for batch_idx in range(n_batches_per_epoch):
@@ -518,8 +518,7 @@ def train_and_measure(X, y, U, v, lam, params, config, device):
             trainer.autoencoder_step()
             trainer.step(batch_idx)
             total_batches_seen += 1
-            elapsed_time += matched_dt
-            elapsed_sgd_time += config.learning_rate
+            elapsed_time += joint_update_dt
 
             if (
                 total_batches_seen % measure_every_batches == 0
@@ -539,7 +538,7 @@ def train_and_measure(X, y, U, v, lam, params, config, device):
                 )
                 measured.append(scalarize_observables(obs, rec))
                 times.append(elapsed_time)
-                sgd_times.append(elapsed_sgd_time)
+                sgd_times.append(elapsed_time)
 
         ae.eval()
         lat_dis.eval()
@@ -569,7 +568,7 @@ def train_and_measure(X, y, U, v, lam, params, config, device):
         },
         measured,
         observables_to_state(initial_obs),
-        float(matched_dt),
+        float(joint_update_dt),
         float(gamma_schedule_time),
     )
 
@@ -602,7 +601,7 @@ def plot_comparison(times, theory_times_dense, theory_hist_dense, measured_hist,
         ax.plot(theory_times_dense, theory_hist_dense[key], label="theory", linewidth=2.0)
         ax.plot(times, measured_hist[key], label="measured", linewidth=1.5, linestyle="--")
         ax.set_title(title)
-        ax.set_xlabel("time")
+        ax.set_xlabel(r"$\tau$ (lr-scaled joint updates)")
         ax.grid(True, alpha=0.25)
         if idx == 0:
             ax.legend()
@@ -615,7 +614,8 @@ def plot_comparison(times, theory_times_dense, theory_hist_dense, measured_hist,
         f"noise_total={params['noise_total']}, lambda_reg={params['lambda_reg']}, "
         f"lam_sig={params['lam_sig']}, lambda_C={params['lambda_C']}, "
         f"alpha_C={params['alpha_C']} clf steps/AE step, "
-        f"eta_clf={params['eta_clf']}, h_scale={params['h_scale']}",
+        f"eta_clf={params['eta_clf']}, h_scale={params['h_scale']}, "
+        f"dt={params['learning_rate']}",
         fontsize=12,
     )
     fig.tight_layout()
@@ -695,7 +695,6 @@ def parse_config():
     parser.add_argument("--learning_rate", type=float, default=base.learning_rate)
     parser.add_argument("--measure_every_batches", type=int, default=base.measure_every_batches)
     parser.add_argument("--lambda_schedule", type=int, default=base.lambda_schedule)
-    parser.add_argument("--theory_t_final", type=float, default=base.theory_t_final)
     parser.add_argument("--theory_points", type=int, default=base.theory_points)
     parser.add_argument("--noise_total", type=float, default=base.noise_total)
     parser.add_argument("--lambda_reg", type=float, default=base.lambda_reg)
@@ -722,7 +721,6 @@ def parse_config():
         learning_rate=args.learning_rate,
         measure_every_batches=args.measure_every_batches,
         lambda_schedule=args.lambda_schedule,
-        theory_t_final=args.theory_t_final,
         theory_points=args.theory_points,
         seed=args.seed,
         teacher_seed=args.teacher_seed,
