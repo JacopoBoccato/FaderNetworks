@@ -33,9 +33,24 @@ conda activate fader_env
 
 # Optional: create logs directory (in repo)
 mkdir -p logs
+mkdir -p .mplcache
+
+#--------------------------------------------------
+# Fast CPU settings (use all allocated cores)
+#--------------------------------------------------
+export NCPUS="${PBS_NCPUS:-20}"
+export OMP_NUM_THREADS="$NCPUS"
+export OPENBLAS_NUM_THREADS="$NCPUS"
+export MKL_NUM_THREADS="$NCPUS"
+export NUMEXPR_NUM_THREADS="$NCPUS"
+export VECLIB_MAXIMUM_THREADS="$NCPUS"
+export OMP_PROC_BIND=spread
+export OMP_PLACES=cores
+export MKL_DYNAMIC=FALSE
+export PYTHONUNBUFFERED=1
+export MPLCONFIGDIR="$PWD/.mplcache"
 
 #--------------------------------------------------
 # Run training
 #--------------------------------------------------
-bash scripts/train_lattice_fader.sh
-
+python -u fader_phase_diagrams_repo_linear.py --device cpu

@@ -27,8 +27,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
 
-from src.model import AutoEncoder, LatentDiscriminator
+from src.model import AutoEncoder, LatentDiscriminator, get_attr_loss, sequence_reconstruction_loss
 from src.branch_b_observables import compute_branch_b_observables
+from src.loader import DataSampler
+from src.training import Trainer
+from src.utils import get_lambda
 
 
 D_DIM = 3
@@ -53,15 +56,17 @@ class ExperimentConfig:
     h_scale: float = 1.0
 
     # Training / measurement controls.
-    n_epochs: int = 1000
+    n_epochs: int = 2000
     n_samples: int = 100000
-    batch_size: int = 16384
-    learning_rate: float = 5e-6
+    batch_size: int = 128
+    epoch_size: int = 0
+    learning_rate: float = 5e-4
     measure_every_batches: int = 1
+    lambda_schedule: int = 0
 
     # Theory integration controls.
-    theory_t_final: float = 500.0
-    theory_points: int = 20000
+    theory_t_final: float = 50.0
+    theory_points: int = 4000
 
     # Reproducibility / runtime controls.
     seed: int = 0
@@ -74,6 +79,7 @@ class ExperimentConfig:
 EXPERIMENT_CONFIG = ExperimentConfig()
 
 OUT_PLOT = "branch_b_theory_vs_training.png"
+OUT_LOSS = "branch_b_training_loss.png"
 OUT_DATA = "branch_b_theory_vs_training.npz"
 
 MAT_DD = D_DIM * D_DIM
@@ -167,6 +173,52 @@ def make_linear_fader(device):
     dec_linear[0].bias.requires_grad_(False)
     clf_linear[0].bias.requires_grad_(False)
     return ae, lat_dis
+
+
+def build_trainer_params(config, device):
+    def fmt_opt_float(x):
+        # src.utils.get_optimizer only accepts plain decimal literals, not 1e-5.
+        return f"{float(x):.12f}"
+
+    epoch_size = int(config.epoch_size) if int(config.epoch_size) > 0 else int(config.n_samples)
+    n_batches = max(int(np.ceil(epoch_size / max(int(config.batch_size), 1))), 1)
+    lambda_schedule = int(config.lambda_schedule)
+    if lambda_schedule <= 0:
+        lambda_schedule = max(1, (int(config.n_epochs) * n_batches) // 3)
+
+    return SimpleNamespace(
+        seq_len=N_DIM,
+        x_type="continuous",
+        n_attr=1,
+        label_type="continuous",
+        encoder_hidden_dims=[D_DIM],
+        decoder_hidden_dims=[],
+        dis_hidden_dims=[],
+        hid_dim=D_DIM,
+        n_amino=0,
+        batch_size=int(config.batch_size),
+        epoch_size=epoch_size,
+        n_epochs=int(config.n_epochs),
+        cuda=(device.type == "cuda"),
+        ae_optimizer=f"sgd,lr={fmt_opt_float(config.learning_rate)},weight_decay={fmt_opt_float(config.lambda_reg)}",
+        dis_optimizer=f"sgd,lr={fmt_opt_float(config.learning_rate)},weight_decay={fmt_opt_float(config.lambda_C)}",
+        clip_grad_norm=0.0,
+        n_lat_dis=max(int(config.alpha_C), 0),
+        n_ptc_dis=0,
+        n_clf_dis=0,
+        lambda_ae=1.0,
+        lambda_lat_dis=float(config.eta_clf),
+        lambda_ptc_dis=0.0,
+        lambda_clf_dis=0.0,
+        lambda_schedule=lambda_schedule,
+        label_noise=0.0,
+        smooth_label=0.0,
+        ae_reload="",
+        lat_dis_reload="",
+        clf_dis_reload="",
+        eval_clf=0,
+        n_total_iter=0,
+    )
 
 
 def extract_linear_matrices(ae, lat_dis, device):
@@ -313,6 +365,15 @@ def scalarize_observables(observables, rec_loss):
     }
 
 
+def classifier_strength(tau, params):
+    """Continuous-time classifier coupling Gamma(t) matched to the repo lambda schedule."""
+    gamma_final = float(params["eta_clf"])
+    schedule_time = float(params.get("gamma_schedule_time", 0.0))
+    if schedule_time <= 0.0:
+        return gamma_final
+    return gamma_final * min(max(float(tau), 0.0) / schedule_time, 1.0)
+
+
 def rhs(tau, X, params):
     M, s, N, a, beta, rho, C, Q, T, u, t, B, m = unpack_state(X)
 
@@ -324,7 +385,7 @@ def rhs(tau, X, params):
     lb = params["lambda_reg"]
     lC = params["lambda_C"]
     alpha_C = params["alpha_C"]
-    eta_clf = params["eta_clf"]
+    eta_clf = classifier_strength(tau, params)
     h = params["h_vec"]
 
     Lambda = lam_sig * np.eye(R_DIM)
@@ -416,26 +477,31 @@ def compute_measured_observables(ae, lat_dis, X, y, U, v, lam, eta, g, device):
 
 
 def train_and_measure(X, y, U, v, lam, params, config, device):
+    trainer_params = build_trainer_params(config, device)
     ae, lat_dis = make_linear_fader(device)
-    ae_opt = torch.optim.SGD([p for p in ae.parameters() if p.requires_grad], lr=config.learning_rate)
-    c_opt = torch.optim.SGD([p for p in lat_dis.parameters() if p.requires_grad], lr=config.learning_rate)
+    train_data = DataSampler(X, y, trainer_params)
+    trainer = Trainer(ae, lat_dis, None, None, train_data, trainer_params)
 
     X_dev = X.to(device)
     y_dev = y.to(device)
     n_samples = X_dev.size(0)
-    batch_size = min(int(config.batch_size), n_samples)
-    n_batches_per_epoch = max(int(np.ceil(n_samples / batch_size)), 1)
+    batch_size = min(int(trainer_params.batch_size), n_samples)
+    epoch_size = int(trainer_params.epoch_size)
+    n_batches_per_epoch = max(int(np.ceil(epoch_size / batch_size)), 1)
     total_joint_updates = max(int(config.n_epochs) * n_batches_per_epoch, 1)
     measure_every_batches = max(int(config.measure_every_batches), 1)
-    classifier_steps = max(int(config.alpha_C), 0)
 
     # Use one effective dt per joint classifier/autoencoder update so the
     # measured trajectory ends at the same horizon as the ODE integration.
     matched_dt = float(config.theory_t_final) / total_joint_updates
+    gamma_schedule_time = matched_dt * float(getattr(trainer_params, "lambda_schedule", 0))
 
     measured = []
     times = [0.0]
     sgd_times = [0.0]
+    epoch_ae_losses = []
+    epoch_clf_losses = []
+    epoch_rec_losses = []
 
     initial_obs, initial_rec = compute_measured_observables(
         ae, lat_dis, X, y, U, v, lam, params["eta"], params["g"], device
@@ -446,37 +512,11 @@ def train_and_measure(X, y, U, v, lam, params, config, device):
     elapsed_sgd_time = 0.0
     total_batches_seen = 0
     for epoch in range(1, config.n_epochs + 1):
-        perm = torch.randperm(n_samples, device=X_dev.device)
-        for start in range(0, n_samples, batch_size):
-            idx = perm[start:start + batch_size]
-            batch_x = X_dev[idx]
-            batch_y = y_dev[idx]
-
-            with torch.no_grad():
-                z_det = ae.encode(batch_x)[-1]
-            for _ in range(classifier_steps):
-                c_opt.zero_grad()
-                y_hat = lat_dis(z_det)
-                _, _, _, C = extract_linear_matrices(ae, lat_dis, device)
-                loss_c = (
-                    params["eta_clf"] * torch.mean((y_hat - batch_y) ** 2)
-                    + params["lambda_C"] * (torch.norm(C) ** 2)
-                )
-                loss_c.backward()
-                c_opt.step()
-
-            ae_opt.zero_grad()
-            enc_outputs, dec_outputs = ae(batch_x, batch_y)
-            z = enc_outputs[-1]
-            x_hat = dec_outputs[-1]
-            y_hat_adv = lat_dis(z)
-            W, A, b, _ = extract_linear_matrices(ae, lat_dis, device)
-            rec_loss = torch.mean((x_hat - batch_x) ** 2)
-            adv_loss = torch.mean((y_hat_adv - batch_y) ** 2)
-            reg = params["lambda_reg"] * (torch.norm(W) ** 2 + torch.norm(A) ** 2 + torch.norm(b) ** 2)
-            loss_ae = rec_loss - params["eta_clf"] * adv_loss + reg
-            loss_ae.backward()
-            ae_opt.step()
+        for batch_idx in range(n_batches_per_epoch):
+            for _ in range(trainer_params.n_lat_dis):
+                trainer.lat_dis_step()
+            trainer.autoencoder_step()
+            trainer.step(batch_idx)
             total_batches_seen += 1
             elapsed_time += matched_dt
             elapsed_sgd_time += config.learning_rate
@@ -501,14 +541,36 @@ def train_and_measure(X, y, U, v, lam, params, config, device):
                 times.append(elapsed_time)
                 sgd_times.append(elapsed_sgd_time)
 
+        ae.eval()
+        lat_dis.eval()
+        with torch.no_grad():
+            enc_outputs, dec_outputs = ae(X_dev, y_dev)
+            recon = dec_outputs[-1]
+            rec_epoch = sequence_reconstruction_loss(recon, X_dev, x_type="continuous").item()
+            lat_preds = lat_dis(enc_outputs[-1])
+            lat_dis_loss = get_attr_loss(lat_preds, y_dev, flip=True, params=trainer_params).item()
+            clf_loss = get_attr_loss(lat_preds, y_dev, flip=False, params=trainer_params).item()
+            current_lambda = get_lambda(trainer_params.lambda_lat_dis, trainer_params)
+            ae_objective = trainer_params.lambda_ae * rec_epoch + current_lambda * lat_dis_loss
+
+        epoch_ae_losses.append(float(ae_objective))
+        epoch_clf_losses.append(float(clf_loss))
+        epoch_rec_losses.append(float(rec_epoch))
+
     return (
         ae,
         lat_dis,
         np.asarray(times, dtype=float),
         np.asarray(sgd_times, dtype=float),
+        {
+            "ae_loss": np.asarray(epoch_ae_losses, dtype=float),
+            "clf_loss": np.asarray(epoch_clf_losses, dtype=float),
+            "rec_loss": np.asarray(epoch_rec_losses, dtype=float),
+        },
         measured,
         observables_to_state(initial_obs),
         float(matched_dt),
+        float(gamma_schedule_time),
     )
 
 
@@ -560,6 +622,66 @@ def plot_comparison(times, theory_times_dense, theory_hist_dense, measured_hist,
     fig.savefig(out_file, dpi=160, bbox_inches="tight")
 
 
+def plot_loss_curve(loss_history, params, out_file=OUT_LOSS):
+    """Plot the repository-style training objective and reconstruction proxy."""
+    ae_losses = np.asarray(loss_history["ae_loss"], dtype=float)
+    clf_losses = np.asarray(loss_history["clf_loss"], dtype=float)
+    rec_losses = np.asarray(loss_history["rec_loss"], dtype=float)
+    if len(ae_losses) == 0:
+        raise ValueError("No epoch losses available to plot.")
+
+    epochs = np.arange(1, len(ae_losses) + 1, dtype=int)
+
+    fig, axes = plt.subplots(2, 1, figsize=(9.5, 7.0), sharex=True)
+    fig.patch.set_facecolor("#1a1a2e")
+
+    for ax in axes:
+        ax.set_facecolor("#0f0f23")
+        ax.grid(True, alpha=0.25)
+
+    axes[0].plot(epochs, ae_losses, color="#f1c40f", lw=2.0, label="AE objective proxy")
+    axes[0].plot(epochs, clf_losses, color="#3498db", lw=1.8, label="latent discriminator loss")
+    axes[0].set_ylabel("train objective")
+    axes[0].set_title("Repository Fader training losses")
+    axes[0].legend()
+
+    axes[1].plot(epochs, rec_losses, color="#2ecc71", lw=2.0, label="full-dataset reconstruction MSE")
+    axes[1].set_xlabel("epoch")
+    axes[1].set_ylabel("reconstruction MSE")
+    axes[1].set_title("Convergence proxy")
+    axes[1].legend()
+
+    if len(rec_losses) >= 4:
+        win = min(10, len(rec_losses) // 2)
+        if win >= 2:
+            prev = rec_losses[-2 * win:-win]
+            last = rec_losses[-win:]
+            prev_mean = float(np.mean(prev))
+            last_mean = float(np.mean(last))
+            rel_improve = abs(prev_mean - last_mean) / max(abs(prev_mean), 1e-12)
+            stability = float(np.std(last) / max(abs(last_mean), 1e-12))
+            axes[1].axvspan(max(len(rec_losses) - 2 * win, 1), len(rec_losses), color="#9b59b6", alpha=0.12, label="convergence window")
+            axes[1].text(
+                0.98,
+                0.02,
+                f"final rec={rec_losses[-1]:.4g}\nrel_improve={rel_improve:.3g}\nstability={stability:.3g}",
+                transform=axes[1].transAxes,
+                ha="right",
+                va="bottom",
+                fontsize=9,
+                bbox=dict(boxstyle="round,pad=0.35", fc="#0f0f23", ec="#666", alpha=0.92),
+            )
+
+    fig.suptitle(
+        "Fader training diagnostics\n"
+        f"lambda_reg={params['lambda_reg']}, lambda_C={params['lambda_C']}, "
+        f"alpha_C={params['alpha_C']}, eta_clf={params['eta_clf']}",
+        fontsize=12,
+    )
+    fig.tight_layout()
+    fig.savefig(out_file, dpi=160, bbox_inches="tight")
+
+
 def parse_config():
     base = EXPERIMENT_CONFIG
     parser = argparse.ArgumentParser(description="Compare Branch-B ODE against trained linear Fader observables.")
@@ -569,8 +691,10 @@ def parse_config():
     parser.add_argument("--n_epochs", type=int, default=base.n_epochs)
     parser.add_argument("--n_samples", type=int, default=base.n_samples)
     parser.add_argument("--batch_size", type=int, default=base.batch_size)
+    parser.add_argument("--epoch_size", type=int, default=base.epoch_size)
     parser.add_argument("--learning_rate", type=float, default=base.learning_rate)
     parser.add_argument("--measure_every_batches", type=int, default=base.measure_every_batches)
+    parser.add_argument("--lambda_schedule", type=int, default=base.lambda_schedule)
     parser.add_argument("--theory_t_final", type=float, default=base.theory_t_final)
     parser.add_argument("--theory_points", type=int, default=base.theory_points)
     parser.add_argument("--noise_total", type=float, default=base.noise_total)
@@ -594,8 +718,10 @@ def parse_config():
         n_epochs=args.n_epochs,
         n_samples=args.n_samples,
         batch_size=args.batch_size,
+        epoch_size=args.epoch_size,
         learning_rate=args.learning_rate,
         measure_every_batches=args.measure_every_batches,
+        lambda_schedule=args.lambda_schedule,
         theory_t_final=args.theory_t_final,
         theory_points=args.theory_points,
         seed=args.seed,
@@ -619,7 +745,7 @@ def main():
     params = build_shared_params(config)
     X, y, U, v, lam = generate_dataset(config, params, N_DIM, R_DIM)
 
-    _, _, times, sgd_times, measured_list, x0, matched_dt = train_and_measure(
+    _, _, times, sgd_times, loss_history, measured_list, x0, matched_dt, gamma_schedule_time = train_and_measure(
         X,
         y,
         U,
@@ -629,6 +755,7 @@ def main():
         config,
         device=device,
     )
+    params["gamma_schedule_time"] = gamma_schedule_time
 
     theory_t_final = float(times[-1])
     theory_times_dense = np.linspace(0.0, theory_t_final, int(config.theory_points))
@@ -641,18 +768,25 @@ def main():
     theory_hist = {k: np.interp(times, theory_times_dense, theory_hist_dense[k]) for k in keys}
 
     plot_comparison(times, theory_times_dense, theory_hist_dense, measured_hist, params, out_plot)
+    plot_loss_curve(loss_history, params, out_file=OUT_LOSS)
 
     np.savez(
         out_data,
         times=times,
         times_sgd=sgd_times,
+        epoch_ae_losses=loss_history["ae_loss"],
+        epoch_clf_losses=loss_history["clf_loss"],
+        epoch_rec_losses=loss_history["rec_loss"],
         theory_times_dense=theory_times_dense,
         **{f"measured_{k}": v for k, v in measured_hist.items()},
         **{f"theory_{k}": v for k, v in theory_hist.items()},
         **{f"theory_dense_{k}": v for k, v in theory_hist_dense.items()},
         matched_dt=matched_dt,
+        gamma_schedule_time=gamma_schedule_time,
         raw_sgd_dt=config.learning_rate,
         measure_every_batches=config.measure_every_batches,
+        epoch_size=config.epoch_size,
+        lambda_schedule=config.lambda_schedule,
         noise_total=params["noise_total"],
         lambda_reg=params["lambda_reg"],
         lam_sig=params["lam_sig"],
@@ -665,6 +799,7 @@ def main():
     )
     print(f"Shared config -> {config}")
     print(f"Saved -> {out_plot}")
+    print(f"Saved -> {OUT_LOSS}")
     print(f"Saved -> {out_data}")
 
 
