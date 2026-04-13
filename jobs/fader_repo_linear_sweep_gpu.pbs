@@ -32,10 +32,11 @@ export MKL_DYNAMIC=FALSE
 export PYTHONUNBUFFERED=1
 export MPLCONFIGDIR="$PWD/.mplcache"
 
-# Sweep/training knobs (override with: qsub -v NX=...,NY=...,TARGET_EPOCHS=...,MAX_EPOCHS=...)
-NX="${NX:-15}"
-NY="${NY:-15}"
-TARGET_EPOCHS="${TARGET_EPOCHS:-200}"
+# Sweep/training knobs (override with: qsub -v VARY_X=...,VARY_Y=...,X_VALUES=...,Y_VALUES=...,MAX_EPOCHS=...)
+VARY_X="${VARY_X:-h_scale}"
+VARY_Y="${VARY_Y:-eta_clf}"
+X_VALUES="${X_VALUES:-0.0,0.25,0.5,0.75,1.0}"
+Y_VALUES="${Y_VALUES:-1.0,5.0,10.0,50.0,100.0}"
 MAX_EPOCHS="${MAX_EPOCHS:-500}"
 WORKERS="${WORKERS:-4}"
 CONV_WINDOW="${CONV_WINDOW:-10}"
@@ -47,13 +48,13 @@ CONV_CHECK_EVERY="${CONV_CHECK_EVERY:-1}"
 python -u fader_phase_diagrams_repo_linear.py \
   --device cuda \
   --workers "$WORKERS" \
-  --nx "$NX" \
-  --ny "$NY" \
-  --n_epochs "$TARGET_EPOCHS" \
+  --vary_x "$VARY_X" \
+  --vary_y "$VARY_Y" \
+  --x_values "$X_VALUES" \
+  --y_values "$Y_VALUES" \
   --max_epochs "$MAX_EPOCHS" \
   --conv_window "$CONV_WINDOW" \
   --conv_min_epochs "$CONV_MIN_EPOCHS" \
   --conv_rel_improve_tol "$CONV_REL_TOL" \
   --conv_stability_tol "$CONV_STAB_TOL" \
   --conv_check_every "$CONV_CHECK_EVERY"
-

@@ -57,8 +57,8 @@ class ExperimentConfig:
 
     # Training / measurement controls.
     n_epochs: int = 2000
-    n_samples: int = 100000
-    batch_size: int = 128
+    n_samples: int = 5000
+    batch_size: int = 1000
     epoch_size: int = 0
     learning_rate: float = 5e-4
     measure_every_batches: int = 1
@@ -607,7 +607,13 @@ def plot_comparison(times, theory_times_dense, theory_hist_dense, measured_hist,
 
     for idx, (key, title) in enumerate(metrics):
         ax = axes[idx]
-        ax.plot(theory_times_dense, theory_hist_dense[key], label="theory", linewidth=2.0)
+        ax.plot(
+            theory_times_dense,
+            theory_hist_dense[key],
+            label="theory",
+            linewidth=2.0,
+            color="#e67e22",
+        )
         ax.scatter(times, measured_hist[key], label="measured", s=18, alpha=0.9, zorder=3)
         ax.set_title(title)
         ax.set_xlabel(r"$\tau$ (lr-scaled joint updates)")
