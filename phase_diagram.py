@@ -28,7 +28,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
 
-from src.model import AutoEncoder, LatentDiscriminator, sequence_reconstruction_loss
+from src.model import AutoEncoder, LatentDiscriminator
 from src.branch_b_observables import compute_branch_b_observables
 
 
@@ -50,10 +50,10 @@ class ExperimentConfig:
     lam_sig: float = 15.0
     lambda_C: float = 0.1
     alpha_C: float = 1.0
-    eta_clf: float = 100.0
+    eta_clf: float = 1.0
     gamma0: float = 0.0
     gamma_mu: float = 0.0
-    h_scale: float = 1.0
+    h_scale: float = 0.2
 
     # Training / measurement controls.
     n_epochs: int = 2000
@@ -66,6 +66,7 @@ class ExperimentConfig:
 
     # Theory integration controls.
     theory_points: int = 4000
+    theory_solver: str = "Radau"
 
     # Reproducibility / runtime controls.
     seed: int = 0
@@ -102,6 +103,8 @@ def build_shared_params(config):
         "gamma_mu": max(float(config.gamma_mu), 0.0),
         "h_scale": config.h_scale,
         "h_vec": config.h_scale * H_DIRECTION,
+        "theory_solver": config.theory_solver,
+        "ambient_dim": N_DIM,
         "eta": eta,
         "g": g,
     }
@@ -270,9 +273,15 @@ def reconstruction_error(state, params):
     Lambda = lam_sig * np.eye(R_DIM)
     S = M @ Lambda @ M.T + g * np.outer(s, s) + eta * Q
     G = N.T @ Lambda @ M.T + g * np.outer(a, s) + eta * B
-    trace_sigma = np.trace(Lambda) + g + eta * D_DIM
+    trace_sigma = np.trace(Lambda) + g + eta * float(params.get("ambient_dim", N_DIM))
     err = trace_sigma + np.trace(T @ S) - 2.0 * np.trace(G) + 2.0 * g * (u @ s - rho) + g * m
     return float(np.real(err))
+
+
+def continuous_reconstruction_error(x_hat, x_true):
+    """Match the theory loss: E[||x_hat - x||^2], not per-coordinate MSE."""
+    sq_err = (x_hat - x_true) ** 2
+    return sq_err.sum(dim=1).mean()
 
 
 def scalarize_state(state, params):
@@ -412,7 +421,7 @@ def integrate_theory(x0, params, t_eval):
         args=(params,),
         rtol=1e-6,
         atol=1e-8,
-        method="RK45",
+        method=params.get("theory_solver", "Radau"),
     )
     if not sol.success:
         raise RuntimeError(f"Theory integration failed: {sol.message}")
@@ -430,7 +439,7 @@ def compute_measured_observables(ae, lat_dis, X, y, U, v, lam, eta, g, device):
         observables = compute_branch_b_observables(W, A, b, C, U_t, v_t, Lambda_t, eta, g)
         X_t = X.to(device)
         y_t = y.to(device)
-        rec_loss = torch.mean((ae(X_t, y_t)[1][-1] - X_t) ** 2).item()
+        rec_loss = continuous_reconstruction_error(ae(X_t, y_t)[1][-1], X_t).item()
     return observables, rec_loss
 
 
@@ -438,7 +447,7 @@ def microscopic_objectives(ae, lat_dis, X_dev, y_dev, gamma_t, params, device):
     enc_outputs, dec_outputs = ae(X_dev, y_dev)
     recon = dec_outputs[-1]
     preds = lat_dis(enc_outputs[-1])
-    rec_loss = sequence_reconstruction_loss(recon, X_dev, x_type="continuous")
+    rec_loss = continuous_reconstruction_error(recon, X_dev)
     clf_loss = torch.mean((preds - y_dev) ** 2)
 
     W, A, b, C = extract_linear_matrices(ae, lat_dis, device)
@@ -599,7 +608,7 @@ def plot_comparison(times, theory_times_dense, theory_hist_dense, measured_hist,
     for idx, (key, title) in enumerate(metrics):
         ax = axes[idx]
         ax.plot(theory_times_dense, theory_hist_dense[key], label="theory", linewidth=2.0)
-        ax.plot(times, measured_hist[key], label="measured", linewidth=1.5, linestyle="--")
+        ax.scatter(times, measured_hist[key], label="measured", s=18, alpha=0.9, zorder=3)
         ax.set_title(title)
         ax.set_xlabel(r"$\tau$ (lr-scaled joint updates)")
         ax.grid(True, alpha=0.25)
@@ -646,8 +655,8 @@ def plot_loss_curve(loss_history, params, out_file=OUT_LOSS):
     axes[0].set_title("Microscopic saddle objectives")
     axes[0].legend()
 
-    axes[1].plot(epochs, rec_losses, color="#2ecc71", lw=2.0, label="full-dataset reconstruction MSE")
-    axes[1].set_ylabel("reconstruction MSE")
+    axes[1].plot(epochs, rec_losses, color="#2ecc71", lw=2.0, label="full-dataset reconstruction error")
+    axes[1].set_ylabel("reconstruction error")
     axes[1].set_title("Convergence proxy")
     axes[1].legend()
 
@@ -703,6 +712,7 @@ def parse_config():
     parser.add_argument("--measure_every_batches", type=int, default=base.measure_every_batches)
     parser.add_argument("--lambda_schedule", type=int, default=base.lambda_schedule)
     parser.add_argument("--theory_points", type=int, default=base.theory_points)
+    parser.add_argument("--theory_solver", type=str, default=base.theory_solver, choices=["RK45", "Radau", "BDF", "DOP853"])
     parser.add_argument("--noise_total", type=float, default=base.noise_total)
     parser.add_argument("--lambda_reg", type=float, default=base.lambda_reg)
     parser.add_argument("--lam_sig", type=float, default=base.lam_sig)
@@ -734,6 +744,7 @@ def parse_config():
         measure_every_batches=args.measure_every_batches,
         lambda_schedule=args.lambda_schedule,
         theory_points=args.theory_points,
+        theory_solver=args.theory_solver,
         seed=args.seed,
         teacher_seed=args.teacher_seed,
         device=args.device,
