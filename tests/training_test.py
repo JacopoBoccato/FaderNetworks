@@ -1,6 +1,6 @@
 # test_train_step.py
 import torch
-from src.model import AutoEncoder, LatentDiscriminator
+from src.model import AutoEncoder, LatentDiscriminator, get_attr_loss
 from src.training import Trainer
 from src.loader import DataSampler
 from src.utils import check_attr
@@ -67,6 +67,11 @@ trainer_cont = Trainer(ae_cont, lat_dis_cont, None, None, data_cont, params_cont
 trainer_cont.lat_dis_step()
 trainer_cont.autoencoder_step()
 trainer_cont.step(0)
+
+preds_cont = lat_dis_cont(ae_cont.encode(x_cont)[-1]).detach()
+pos_loss = get_attr_loss(preds_cont, y_cont, flip=False, params=params_cont)
+neg_loss = get_attr_loss(preds_cont, y_cont, flip=True, params=params_cont)
+assert torch.isclose(neg_loss, -pos_loss), "Continuous AE adversarial loss should negate classifier MSE."
 
 # indexed-X pipeline test
 params_idx = P()

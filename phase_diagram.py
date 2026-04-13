@@ -7,7 +7,8 @@ This script:
 2. Initializes a strict linear Fader with repository modules.
 3. Computes the full Branch-B observable state at initialization.
 4. Integrates the theoretical ODE from that same initial observable state.
-5. Trains the microscopic linear Fader under the same fixed game.
+5. Trains the microscopic linear Fader with minibatch saddle updates under
+   that same game.
 6. Plots theoretical trajectories vs measured trajectories for all observables.
 """
 
@@ -27,11 +28,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
 
-from src.model import AutoEncoder, LatentDiscriminator, get_attr_loss, sequence_reconstruction_loss
+from src.model import AutoEncoder, LatentDiscriminator, sequence_reconstruction_loss
 from src.branch_b_observables import compute_branch_b_observables
-from src.loader import DataSampler
-from src.training import Trainer
-from src.utils import get_lambda
 
 
 D_DIM = 3
@@ -51,8 +49,10 @@ class ExperimentConfig:
     lambda_reg: float = 0.5
     lam_sig: float = 15.0
     lambda_C: float = 0.1
-    alpha_C: int = 1
+    alpha_C: float = 1.0
     eta_clf: float = 100.0
+    gamma0: float = 0.0
+    gamma_mu: float = 0.0
     h_scale: float = 1.0
 
     # Training / measurement controls.
@@ -98,6 +98,8 @@ def build_shared_params(config):
         "lambda_C": config.lambda_C,
         "alpha_C": max(float(config.alpha_C), 0.0),
         "eta_clf": max(config.eta_clf, 1e-8),
+        "gamma0": float(config.gamma0),
+        "gamma_mu": max(float(config.gamma_mu), 0.0),
         "h_scale": config.h_scale,
         "h_vec": config.h_scale * H_DIRECTION,
         "eta": eta,
@@ -173,52 +175,6 @@ def make_linear_fader(device):
     dec_linear[0].bias.requires_grad_(False)
     clf_linear[0].bias.requires_grad_(False)
     return ae, lat_dis
-
-
-def build_trainer_params(config, device):
-    def fmt_opt_float(x):
-        # src.utils.get_optimizer only accepts plain decimal literals, not 1e-5.
-        return f"{float(x):.12f}"
-
-    epoch_size = int(config.epoch_size) if int(config.epoch_size) > 0 else int(config.n_samples)
-    n_batches = max(int(np.ceil(epoch_size / max(int(config.batch_size), 1))), 1)
-    lambda_schedule = int(config.lambda_schedule)
-    if lambda_schedule <= 0:
-        lambda_schedule = max(1, (int(config.n_epochs) * n_batches) // 3)
-
-    return SimpleNamespace(
-        seq_len=N_DIM,
-        x_type="continuous",
-        n_attr=1,
-        label_type="continuous",
-        encoder_hidden_dims=[D_DIM],
-        decoder_hidden_dims=[],
-        dis_hidden_dims=[],
-        hid_dim=D_DIM,
-        n_amino=0,
-        batch_size=int(config.batch_size),
-        epoch_size=epoch_size,
-        n_epochs=int(config.n_epochs),
-        cuda=(device.type == "cuda"),
-        ae_optimizer=f"sgd,lr={fmt_opt_float(config.learning_rate)},weight_decay={fmt_opt_float(config.lambda_reg)}",
-        dis_optimizer=f"sgd,lr={fmt_opt_float(config.learning_rate)},weight_decay={fmt_opt_float(config.lambda_C)}",
-        clip_grad_norm=0.0,
-        n_lat_dis=max(int(config.alpha_C), 0),
-        n_ptc_dis=0,
-        n_clf_dis=0,
-        lambda_ae=1.0,
-        lambda_lat_dis=float(config.eta_clf),
-        lambda_ptc_dis=0.0,
-        lambda_clf_dis=0.0,
-        lambda_schedule=lambda_schedule,
-        label_noise=0.0,
-        smooth_label=0.0,
-        ae_reload="",
-        lat_dis_reload="",
-        clf_dis_reload="",
-        eval_clf=0,
-        n_total_iter=0,
-    )
 
 
 def extract_linear_matrices(ae, lat_dis, device):
@@ -366,12 +322,14 @@ def scalarize_observables(observables, rec_loss):
 
 
 def classifier_strength(tau, params):
-    """Continuous-time classifier coupling Gamma(t) matched to the repo lambda schedule."""
-    gamma_final = float(params["eta_clf"])
-    schedule_time = float(params.get("gamma_schedule_time", 0.0))
-    if schedule_time <= 0.0:
-        return gamma_final
-    return gamma_final * min(max(float(tau), 0.0) / schedule_time, 1.0)
+    """Classifier coupling Gamma(t) from the paper's saturating schedule."""
+    gamma_inf = float(params["eta_clf"])
+    gamma0 = float(params.get("gamma0", gamma_inf))
+    gamma_mu = float(params.get("gamma_mu", 0.0))
+    if gamma_mu <= 0.0:
+        return gamma_inf
+    tau = max(float(tau), 0.0)
+    return gamma_inf - (gamma_inf - gamma0) * np.exp(-gamma_mu * tau)
 
 
 def rhs(tau, X, params):
@@ -385,7 +343,7 @@ def rhs(tau, X, params):
     lb = params["lambda_reg"]
     lC = params["lambda_C"]
     alpha_C = params["alpha_C"]
-    eta_clf = classifier_strength(tau, params)
+    gamma_t = classifier_strength(tau, params)
     h = params["h_vec"]
 
     Lambda = lam_sig * np.eye(R_DIM)
@@ -403,42 +361,42 @@ def rhs(tau, X, params):
 
     dM = (
         -2 * (T @ M @ D - N.T @ D + g * np.outer(T @ s - a + u, h))
-        + 2 * eta_clf * (CCt @ (M @ D + g * np.outer(s, h)))
-        - 2 * eta_clf * g * np.outer(C, h)
+        + 2 * gamma_t * (CCt @ (M @ D + g * np.outer(s, h)))
+        - 2 * gamma_t * g * np.outer(C, h)
         - 2 * lW * M
     )
     ds = (
         -2 * ((T @ M - N.T) @ (Lambda @ h) + kappa * (T @ s) - kappa * a + g * u)
-        + 2 * eta_clf * (CCt @ (M @ (Lambda @ h) + kappa * s))
-        - 2 * eta_clf * g * C
+        + 2 * gamma_t * (CCt @ (M @ (Lambda @ h) + kappa * s))
+        - 2 * gamma_t * g * C
         - 2 * lW * s
     )
     dN = -2 * (N @ S - D @ M.T + g * np.outer(beta - h, s)) - 2 * lA * N
     da = -2 * (S @ a - M @ (Lambda @ h) - kappa * s + g * rho * s) - 2 * lA * a
     dbeta = -2 * g * (N @ s - h + beta) - 2 * lb * beta
     drho = -2 * g * (a @ s - 1.0 + rho) - 2 * lb * rho
-    dC = -2 * alpha_C * (eta_clf * (S @ C - g * s) + lC * C)
+    dC = -2 * alpha_C * (gamma_t * (S @ C - g * s) + lC * C)
     dQ = (
         -2 * aux
         - 2 * aux.T
-        + 2 * eta_clf * (CCt @ S + S @ CCt)
-        - 2 * eta_clf * g * (np.outer(C, s) + np.outer(s, C))
+        + 2 * gamma_t * (CCt @ S + S @ CCt)
+        - 2 * gamma_t * g * (np.outer(C, s) + np.outer(s, C))
         - 4 * lW * Q
     )
     dT = -2 * aux - 2 * aux.T - 4 * lA * T
     du = -2 * (S @ u - H + g * m * s) - 2 * g * (T @ s - a + u) - 2 * (lA + lb) * u
     dt_ = (
         -2 * (T @ H - q + g * rho * u)
-        + 2 * eta_clf * (CCt @ H)
-        - 2 * eta_clf * g * rho * C
+        + 2 * gamma_t * (CCt @ H)
+        - 2 * gamma_t * g * rho * C
         - 2 * g * (B.T @ s - s + t)
         - 2 * (lW + lb) * t
     )
     dB = (
         -2 * (S @ B - S + g * np.outer(s, t))
         - 2 * (G @ T - J + g * np.outer(a, u))
-        + 2 * eta_clf * (G @ CCt)
-        - 2 * eta_clf * g * np.outer(a, C)
+        + 2 * gamma_t * (G @ CCt)
+        - 2 * gamma_t * g * np.outer(a, C)
         - 2 * (lA + lW) * B
     )
     dm = -4 * g * (u @ s - rho + m) - 4 * lb * m
@@ -476,26 +434,64 @@ def compute_measured_observables(ae, lat_dis, X, y, U, v, lam, eta, g, device):
     return observables, rec_loss
 
 
+def microscopic_objectives(ae, lat_dis, X_dev, y_dev, gamma_t, params, device):
+    enc_outputs, dec_outputs = ae(X_dev, y_dev)
+    recon = dec_outputs[-1]
+    preds = lat_dis(enc_outputs[-1])
+    rec_loss = sequence_reconstruction_loss(recon, X_dev, x_type="continuous")
+    clf_loss = torch.mean((preds - y_dev) ** 2)
+
+    W, A, b, C = extract_linear_matrices(ae, lat_dis, device)
+    reg_ae = params["lambda_reg"] * ((W ** 2).sum() + (A ** 2).sum() + (b ** 2).sum())
+    reg_c = params["lambda_C"] * (C ** 2).sum()
+
+    ae_objective = rec_loss - gamma_t * clf_loss + reg_ae
+    c_objective = gamma_t * clf_loss + reg_c
+    return ae_objective, c_objective, rec_loss, clf_loss
+
+
+def microscopic_saddle_step(ae, lat_dis, batch_x, batch_y, tau, params, device):
+    ae.train()
+    lat_dis.train()
+
+    gamma_t = classifier_strength(tau, params)
+    ae_objective, c_objective, rec_loss, clf_loss = microscopic_objectives(
+        ae, lat_dis, batch_x, batch_y, gamma_t, params, device
+    )
+
+    ae_params = [p for p in ae.parameters() if p.requires_grad]
+    c_params = [p for p in lat_dis.parameters() if p.requires_grad]
+
+    ae_grads = torch.autograd.grad(ae_objective, ae_params, retain_graph=True)
+    c_grads = torch.autograd.grad(c_objective, c_params)
+
+    with torch.no_grad():
+        for param, grad in zip(ae_params, ae_grads):
+            param -= float(params["learning_rate"]) * grad
+        for param, grad in zip(c_params, c_grads):
+            param -= float(params["learning_rate"]) * float(params["alpha_C"]) * grad
+
+    return (
+        float(ae_objective.item()),
+        float(c_objective.item()),
+        float(rec_loss.item()),
+        float(clf_loss.item()),
+        float(gamma_t),
+    )
+
+
 def train_and_measure(X, y, U, v, lam, params, config, device):
-    trainer_params = build_trainer_params(config, device)
     ae, lat_dis = make_linear_fader(device)
-    train_data = DataSampler(X, y, trainer_params)
-    trainer = Trainer(ae, lat_dis, None, None, train_data, trainer_params)
 
     X_dev = X.to(device)
     y_dev = y.to(device)
     n_samples = X_dev.size(0)
-    batch_size = min(int(trainer_params.batch_size), n_samples)
-    epoch_size = int(trainer_params.epoch_size)
+    batch_size = min(max(int(config.batch_size), 1), n_samples)
+    epoch_size = int(config.epoch_size) if int(config.epoch_size) > 0 else int(n_samples)
     n_batches_per_epoch = max(int(np.ceil(epoch_size / batch_size)), 1)
-    total_joint_updates = max(int(config.n_epochs) * n_batches_per_epoch, 1)
-    measure_every_batches = max(int(config.measure_every_batches), 1)
-
-    # Match the ODE clock to SGD time: one joint update advances continuous
-    # time by the learning rate, so one ODE unit corresponds to 1 / lr joint
-    # updates of the microscopic Fader game.
+    total_steps = max(int(config.n_epochs) * n_batches_per_epoch, 1)
+    measure_every_steps = max(int(config.measure_every_batches), 1)
     joint_update_dt = float(config.learning_rate)
-    gamma_schedule_time = joint_update_dt * float(getattr(trainer_params, "lambda_schedule", 0))
 
     measured = []
     times = [0.0]
@@ -503,6 +499,7 @@ def train_and_measure(X, y, U, v, lam, params, config, device):
     epoch_ae_losses = []
     epoch_clf_losses = []
     epoch_rec_losses = []
+    gamma_history = []
 
     initial_obs, initial_rec = compute_measured_observables(
         ae, lat_dis, X, y, U, v, lam, params["eta"], params["g"], device
@@ -510,20 +507,30 @@ def train_and_measure(X, y, U, v, lam, params, config, device):
     measured.append(scalarize_observables(initial_obs, initial_rec))
 
     elapsed_time = 0.0
-    total_batches_seen = 0
-    for epoch in range(1, config.n_epochs + 1):
-        for batch_idx in range(n_batches_per_epoch):
-            for _ in range(trainer_params.n_lat_dis):
-                trainer.lat_dis_step()
-            trainer.autoencoder_step()
-            trainer.step(batch_idx)
-            total_batches_seen += 1
+    step_idx = 0
+    for _ in range(int(config.n_epochs)):
+        order = torch.randperm(n_samples, device=device)
+        offset = 0
+
+        for _ in range(n_batches_per_epoch):
+            if offset + batch_size > n_samples:
+                order = torch.randperm(n_samples, device=device)
+                offset = 0
+
+            batch_idx = order[offset:offset + batch_size]
+            offset += batch_size
+
+            batch_x = X_dev[batch_idx]
+            batch_y = y_dev[batch_idx]
+
+            ae_obj, c_obj, rec_obj, clf_obj, gamma_t = microscopic_saddle_step(
+                ae, lat_dis, batch_x, batch_y, elapsed_time, params, device
+            )
+
+            step_idx += 1
             elapsed_time += joint_update_dt
 
-            if (
-                total_batches_seen % measure_every_batches == 0
-                or total_batches_seen == total_joint_updates
-            ):
+            if step_idx % measure_every_steps == 0 or step_idx == total_steps:
                 obs, rec = compute_measured_observables(
                     ae,
                     lat_dis,
@@ -540,21 +547,14 @@ def train_and_measure(X, y, U, v, lam, params, config, device):
                 times.append(elapsed_time)
                 sgd_times.append(elapsed_time)
 
-        ae.eval()
-        lat_dis.eval()
-        with torch.no_grad():
-            enc_outputs, dec_outputs = ae(X_dev, y_dev)
-            recon = dec_outputs[-1]
-            rec_epoch = sequence_reconstruction_loss(recon, X_dev, x_type="continuous").item()
-            lat_preds = lat_dis(enc_outputs[-1])
-            lat_dis_loss = get_attr_loss(lat_preds, y_dev, flip=True, params=trainer_params).item()
-            clf_loss = get_attr_loss(lat_preds, y_dev, flip=False, params=trainer_params).item()
-            current_lambda = get_lambda(trainer_params.lambda_lat_dis, trainer_params)
-            ae_objective = trainer_params.lambda_ae * rec_epoch + current_lambda * lat_dis_loss
-
-        epoch_ae_losses.append(float(ae_objective))
-        epoch_clf_losses.append(float(clf_loss))
-        epoch_rec_losses.append(float(rec_epoch))
+        gamma_epoch = classifier_strength(elapsed_time, params)
+        ae_epoch, c_epoch, rec_epoch, _ = microscopic_objectives(
+            ae, lat_dis, X_dev, y_dev, gamma_epoch, params, device
+        )
+        epoch_ae_losses.append(float(ae_epoch.item()))
+        epoch_clf_losses.append(float(c_epoch.item()))
+        epoch_rec_losses.append(float(rec_epoch.item()))
+        gamma_history.append(float(gamma_epoch))
 
     return (
         ae,
@@ -565,11 +565,11 @@ def train_and_measure(X, y, U, v, lam, params, config, device):
             "ae_loss": np.asarray(epoch_ae_losses, dtype=float),
             "clf_loss": np.asarray(epoch_clf_losses, dtype=float),
             "rec_loss": np.asarray(epoch_rec_losses, dtype=float),
+            "gamma": np.asarray(gamma_history, dtype=float),
         },
         measured,
         observables_to_state(initial_obs),
         float(joint_update_dt),
-        float(gamma_schedule_time),
     )
 
 
@@ -613,9 +613,9 @@ def plot_comparison(times, theory_times_dense, theory_hist_dense, measured_hist,
         "Branch-B Theory vs Measured Linear Fader Dynamics\n"
         f"noise_total={params['noise_total']}, lambda_reg={params['lambda_reg']}, "
         f"lam_sig={params['lam_sig']}, lambda_C={params['lambda_C']}, "
-        f"alpha_C={params['alpha_C']} clf steps/AE step, "
-        f"eta_clf={params['eta_clf']}, h_scale={params['h_scale']}, "
-        f"dt={params['learning_rate']}",
+        f"dt={params['learning_rate']}, alpha_C={params['alpha_C']}, "
+        f"Gamma_inf={params['eta_clf']}, Gamma0={params['gamma0']}, "
+        f"gamma_mu={params['gamma_mu']}, h_scale={params['h_scale']}",
         fontsize=12,
     )
     fig.tight_layout()
@@ -627,26 +627,26 @@ def plot_loss_curve(loss_history, params, out_file=OUT_LOSS):
     ae_losses = np.asarray(loss_history["ae_loss"], dtype=float)
     clf_losses = np.asarray(loss_history["clf_loss"], dtype=float)
     rec_losses = np.asarray(loss_history["rec_loss"], dtype=float)
+    gamma_values = np.asarray(loss_history["gamma"], dtype=float)
     if len(ae_losses) == 0:
         raise ValueError("No epoch losses available to plot.")
 
     epochs = np.arange(1, len(ae_losses) + 1, dtype=int)
 
-    fig, axes = plt.subplots(2, 1, figsize=(9.5, 7.0), sharex=True)
+    fig, axes = plt.subplots(3, 1, figsize=(9.5, 9.0), sharex=True)
     fig.patch.set_facecolor("#1a1a2e")
 
     for ax in axes:
         ax.set_facecolor("#0f0f23")
         ax.grid(True, alpha=0.25)
 
-    axes[0].plot(epochs, ae_losses, color="#f1c40f", lw=2.0, label="AE objective proxy")
-    axes[0].plot(epochs, clf_losses, color="#3498db", lw=1.8, label="latent discriminator loss")
+    axes[0].plot(epochs, ae_losses, color="#f1c40f", lw=2.0, label="AE descent objective")
+    axes[0].plot(epochs, clf_losses, color="#3498db", lw=1.8, label="classifier descent objective")
     axes[0].set_ylabel("train objective")
-    axes[0].set_title("Repository Fader training losses")
+    axes[0].set_title("Microscopic saddle objectives")
     axes[0].legend()
 
     axes[1].plot(epochs, rec_losses, color="#2ecc71", lw=2.0, label="full-dataset reconstruction MSE")
-    axes[1].set_xlabel("epoch")
     axes[1].set_ylabel("reconstruction MSE")
     axes[1].set_title("Convergence proxy")
     axes[1].legend()
@@ -672,10 +672,17 @@ def plot_loss_curve(loss_history, params, out_file=OUT_LOSS):
                 bbox=dict(boxstyle="round,pad=0.35", fc="#0f0f23", ec="#666", alpha=0.92),
             )
 
+    axes[2].plot(epochs, gamma_values, color="#e67e22", lw=2.0, label=r"$\Gamma(\tau)$")
+    axes[2].set_xlabel("epoch")
+    axes[2].set_ylabel("classifier strength")
+    axes[2].set_title("Time-dependent classifier schedule")
+    axes[2].legend()
+
     fig.suptitle(
-        "Fader training diagnostics\n"
+        "Linear Fader saddle-game diagnostics\n"
         f"lambda_reg={params['lambda_reg']}, lambda_C={params['lambda_C']}, "
-        f"alpha_C={params['alpha_C']}, eta_clf={params['eta_clf']}",
+        f"dt={params['learning_rate']}, alpha_C={params['alpha_C']}, "
+        f"Gamma_inf={params['eta_clf']}, Gamma0={params['gamma0']}, gamma_mu={params['gamma_mu']}",
         fontsize=12,
     )
     fig.tight_layout()
@@ -700,10 +707,13 @@ def parse_config():
     parser.add_argument("--lambda_reg", type=float, default=base.lambda_reg)
     parser.add_argument("--lam_sig", type=float, default=base.lam_sig)
     parser.add_argument("--lambda_C", type=float, default=base.lambda_C)
-    parser.add_argument("--alpha_C", type=int, default=base.alpha_C)
+    parser.add_argument("--alpha_C", type=float, default=base.alpha_C)
     parser.add_argument("--eta_clf", type=float, default=base.eta_clf)
+    parser.add_argument("--gamma0", type=float, default=base.gamma0)
+    parser.add_argument("--gamma_mu", type=float, default=base.gamma_mu)
     parser.add_argument("--h_scale", type=float, default=base.h_scale)
     parser.add_argument("--out_plot", type=str, default=OUT_PLOT)
+    parser.add_argument("--out_loss", type=str, default=OUT_LOSS)
     parser.add_argument("--out_data", type=str, default=OUT_DATA)
     args = parser.parse_args()
     config = ExperimentConfig(
@@ -713,6 +723,8 @@ def parse_config():
         lambda_C=args.lambda_C,
         alpha_C=args.alpha_C,
         eta_clf=args.eta_clf,
+        gamma0=args.gamma0,
+        gamma_mu=args.gamma_mu,
         h_scale=args.h_scale,
         n_epochs=args.n_epochs,
         n_samples=args.n_samples,
@@ -726,11 +738,11 @@ def parse_config():
         teacher_seed=args.teacher_seed,
         device=args.device,
     )
-    return config, args.out_plot, args.out_data
+    return config, args.out_plot, args.out_loss, args.out_data
 
 
 def main():
-    config, out_plot, out_data = parse_config()
+    config, out_plot, out_loss, out_data = parse_config()
 
     np.random.seed(config.seed)
     torch.manual_seed(config.seed)
@@ -743,7 +755,7 @@ def main():
     params = build_shared_params(config)
     X, y, U, v, lam = generate_dataset(config, params, N_DIM, R_DIM)
 
-    _, _, times, sgd_times, loss_history, measured_list, x0, matched_dt, gamma_schedule_time = train_and_measure(
+    _, _, times, sgd_times, loss_history, measured_list, x0, matched_dt = train_and_measure(
         X,
         y,
         U,
@@ -753,7 +765,6 @@ def main():
         config,
         device=device,
     )
-    params["gamma_schedule_time"] = gamma_schedule_time
 
     theory_t_final = float(times[-1])
     theory_times_dense = np.linspace(0.0, theory_t_final, int(config.theory_points))
@@ -766,7 +777,7 @@ def main():
     theory_hist = {k: np.interp(times, theory_times_dense, theory_hist_dense[k]) for k in keys}
 
     plot_comparison(times, theory_times_dense, theory_hist_dense, measured_hist, params, out_plot)
-    plot_loss_curve(loss_history, params, out_file=OUT_LOSS)
+    plot_loss_curve(loss_history, params, out_file=out_loss)
 
     np.savez(
         out_data,
@@ -775,21 +786,25 @@ def main():
         epoch_ae_losses=loss_history["ae_loss"],
         epoch_clf_losses=loss_history["clf_loss"],
         epoch_rec_losses=loss_history["rec_loss"],
+        gamma_history=loss_history["gamma"],
         theory_times_dense=theory_times_dense,
         **{f"measured_{k}": v for k, v in measured_hist.items()},
         **{f"theory_{k}": v for k, v in theory_hist.items()},
         **{f"theory_dense_{k}": v for k, v in theory_hist_dense.items()},
         matched_dt=matched_dt,
-        gamma_schedule_time=gamma_schedule_time,
-        raw_sgd_dt=config.learning_rate,
-        measure_every_batches=config.measure_every_batches,
+        alpha_AE=params["learning_rate"],
+        alpha_C=params["alpha_C"],
+        gamma0=params["gamma0"],
+        gamma_inf=params["eta_clf"],
+        gamma_mu=params["gamma_mu"],
+        measure_every_steps=config.measure_every_batches,
+        batch_size=config.batch_size,
         epoch_size=config.epoch_size,
-        lambda_schedule=config.lambda_schedule,
+        n_steps=config.n_epochs,
         noise_total=params["noise_total"],
         lambda_reg=params["lambda_reg"],
         lam_sig=params["lam_sig"],
         lambda_C=params["lambda_C"],
-        alpha_C=params["alpha_C"],
         eta_clf=params["eta_clf"],
         h_scale=params["h_scale"],
         eta=params["eta"],
@@ -797,7 +812,7 @@ def main():
     )
     print(f"Shared config -> {config}")
     print(f"Saved -> {out_plot}")
-    print(f"Saved -> {OUT_LOSS}")
+    print(f"Saved -> {out_loss}")
     print(f"Saved -> {out_data}")
 
 

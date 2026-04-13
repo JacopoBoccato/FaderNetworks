@@ -1,311 +1,129 @@
 # FaderNetworks for Biological Sequences
 
-This repository adapts Fader Networks to biological-sequence style data and also contains a research pipeline for comparing trained linear Fader dynamics against Branch-B theory on synthetic Gaussian teacher data.
+This repository adapts the original Fader Networks codebase to biological-sequence style data and also keeps a small synthetic linear / Branch-B research area in the root directory.
 
-It supports two distinct workflows:
+The repository is best understood as three layers:
 
-1. Standard repository Fader training on sequence-like data using `train.py` and the modules in `src/`.
-2. Branch-B theory experiments and phase-diagram sweeps using synthetic data and strict linear versions of the repository models.
+- `src/`: reusable model, training, loading, evaluation, and observable code
+- root scripts: training entrypoints, synthetic experiments, plotting, and legacy upstream utilities
+- `scripts/`: dataset preparation and checkpoint-inspection helpers
 
-## Core Idea
+For a file-by-file guide to the Python code outside `src/`, see [docs/non_src_python_guide.md](docs/non_src_python_guide.md).
 
-A Fader Network splits training into:
+## Current Workflows
 
-1. An autoencoder that reconstructs `x` from a latent code `z = E(x)` and an attribute `y`.
-2. A latent discriminator that tries to predict `y` from `z`.
+### 1. Standard sequence training
 
-The decoder receives `y` explicitly, so the encoder is encouraged to remove attribute information from the latent code while preserving the information needed for reconstruction.
+Use [`train.py`](train.py) with the modules in [`src/`](src/).
 
-In this repository:
+This is the canonical path for training dense sequence Fader models on:
 
-- `src/model.py` defines the general `AutoEncoder` and `LatentDiscriminator`.
-- `src/training.py` defines the repository training loop and adversarial scheduling.
-- `src/utils.py` defines the discriminator lambda ramp through `get_lambda(...)`.
+- one-hot sequence inputs with binary / categorical labels
+- one-hot sequence inputs with continuous labels
+- continuous inputs with continuous labels
 
-## Repository Structure
+The core implementation lives in:
 
-For a grouped map of every Python file outside `src/`, including which ones are canonical, legacy, or theory-facing, see [docs/non_src_python_guide.md](docs/non_src_python_guide.md).
+- [`src/model.py`](src/model.py): `AutoEncoder`, `LatentDiscriminator`, optional extra discriminators
+- [`src/training.py`](src/training.py): alternating discriminator / autoencoder updates
+- [`src/loader.py`](src/loader.py): dataset loading and `DataSampler`
+- [`src/utils.py`](src/utils.py): experiment setup, optimizer parsing, lambda scheduling
 
-### Standard Training
+### 2. Dataset preparation
 
-- `train.py`
-  Main entrypoint for standard Fader training.
+The main preprocessing helpers live in [`scripts/`](scripts):
 
-- `src/model.py`
-  Core models:
-  - `AutoEncoder`
-  - `LatentDiscriminator`
-  - optional discriminators and loss helpers
+- [`scripts/prepare_EM_dataset.py`](scripts/prepare_EM_dataset.py): build a lattice / protein dataset with binary labels derived from charge-pattern rules
+- [`scripts/process_rna_sequences.py`](scripts/process_rna_sequences.py): parse RNA records with taxonomy and save tensors plus metadata
 
-- `src/training.py`
-  Alternating training logic:
-  - latent discriminator step
-  - optional other discriminator steps
-  - autoencoder step
+Important: `train.py` loads datasets named `sequences_<seq_len>.pth` and `labels_<seq_len>.pth` from `--data_path`. The RNA preprocessing script currently writes `rna_sequences_<L>.pth` and `rna_labels_<L>.pth`, so those outputs need to be renamed or adapted before they are consumed by `train.py`.
 
-- `src/utils.py`
-  Utilities including optimizer construction and adversarial lambda scheduling.
+### 3. Synthetic linear / Branch-B experiments
 
-- `src/loader.py`
-  Sequence loading, one-hot / continuous handling, and `DataSampler`.
+There are two root-level theory scripts:
 
-### Branch-B / Theory Scripts
+- [`phase_diagram.py`](phase_diagram.py): main strict-linear theory-vs-training comparison script
+- [`create_dummy_dataset.py`](create_dummy_dataset.py): near-duplicate synthetic experiment script with a misleading name
 
-- `fader_phase_diagrams_repo_linear.py`
-  Canonical Branch-B sweep script using the repository models and `Trainer` in strict linear mode.
+These are useful for research experiments, but they are not the main sequence-training entrypoint.
 
-- `compare_branch_b_dynamics.py`
-  Direct theory-vs-training comparison for a single configuration:
-  - generates teacher data
-  - trains a strict linear Fader
-  - integrates the Branch-B ODE
-  - compares observables over time
-  - saves a separate convergence / loss plot
+## Repository Layout
 
-- `fader_phase_diagrams.py`
-  Older standalone phase-diagram implementation. Useful as a reference, but less aligned with repository training semantics than `fader_phase_diagrams_repo_linear.py`.
+```text
+.
+├── src/          reusable implementation
+├── scripts/      dataset prep and checkpoint utilities
+├── tests/        smoke-style tests
+├── jobs/         PBS launchers
+├── models/       experiment outputs
+├── results/      saved result artifacts
+├── train.py      standard training entrypoint
+├── phase_diagram.py
+├── create_dummy_dataset.py
+├── plot_branch_b_results.py
+├── plot_observables.py
+├── decoder_weights.py
+├── classifier.py
+└── interpolate.py
+```
 
-### Observable / Plotting Utilities
+## Data Format Expected by `train.py`
 
-- `plot_observables.py`
-  Plots stored observable histories from experiment outputs.
+Place tensors under `--data_path` using these names:
 
-- `plot_branch_b_results.py`
-  Plotting utility for Branch-B-style saved grids and observables.
+- `sequences_<seq_len>.pth`
+- `labels_<seq_len>.pth`
+- optional `attributes.pth`
 
-## Installation
+Supported tensor conventions:
 
-The repository expects:
+- `x_type=onehot`: sequence tensor shaped `(N, n_symbols, seq_len)`
+- `x_type=continuous`: sequence tensor shaped `(N, seq_len)`
+- `label_type=binary`: label tensor shaped `(N, n_attr)`
+- `label_type=continuous`: label tensor shaped `(N, 1)` or `(N, n_attr)` depending on the experiment
 
-- Python 3
-- NumPy
-- SciPy
-- PyTorch
-- Matplotlib
-- CUDA if you want GPU training
+If `labels_<seq_len>.pth` is missing, [`src/loader.py`](src/loader.py) will generate dummy labels for testing.
 
-If you maintain dependencies with `requirements.txt` or `environment.yml`, prefer those over manual installation.
+## Quick Start
 
-## Standard Fader Loss in This Repository
-
-The repository training logic is defined in `src/training.py`.
-
-For the autoencoder step:
-
-- reconstruction loss is computed with `sequence_reconstruction_loss(...)`
-- adversarial pressure is applied through `lambda_lat_dis`
-- the adversarial term is ramped with `get_lambda(...)` from `src/utils.py`
-
-For continuous labels, the relevant training form is:
-
-\[
-\mathcal{L}_{\mathrm{AE}}
-=
-\lambda_{\mathrm{ae}} \, \mathcal{L}_{\mathrm{rec}}
-+
-\lambda_{\mathrm{lat}}(t) \, \mathcal{L}_{\mathrm{lat\_dis}}
-\]
-
-where:
-
-- `\mathcal{L}_{rec}` is the reconstruction loss
-- `\mathcal{L}_{lat_dis}` is the latent discriminator loss evaluated in the repository convention
-- `\lambda_{lat}(t)` is the scheduled adversarial weight from `get_lambda(...)`
-
-The latent discriminator itself is trained in alternating steps to predict the true attribute from the latent code.
-
-Important: the compare / Branch-B scripts may use strict linearized versions of the repository models, but the canonical adversarial scheduling logic should still come from `src/training.py` and `src/utils.py` if you want behavior consistent with the repository.
-
-## Branch-B Teacher Model
-
-The synthetic theory scripts use a Gaussian teacher model of the form:
-
-\[
-X = Uc + vy + \sqrt{\eta}\,a
-\]
-
-with:
-
-- `U \in R^{n x r}` orthonormal signal subspace
-- `v \in R^n` nuisance / attribute direction
-- `c` signal latent variable
-- `y` scalar continuous attribute
-- `a` isotropic noise
-- `\eta` reconstruction-noise level
-
-The total noise is split into:
-
-- `eta = ETA_FRACTION * noise_total`
-- `g = (1 - ETA_FRACTION) * noise_total`
-
-These values are then reused in both the measured Fader training pipeline and the ODE.
-
-## Main Research Workflows
-
-### 1. Compare Branch-B Theory to Trained Dynamics
-
-Run:
+Install dependencies with either:
 
 ```bash
-python compare_branch_b_dynamics.py
+pip install -r requirements.txt
 ```
 
-Useful flags:
+or:
 
 ```bash
-python compare_branch_b_dynamics.py \
-  --device cuda \
-  --n_epochs 1000 \
-  --alpha_C 1 \
-  --eta_clf 1.0 \
-  --lambda_schedule 50000
+conda env create -f environment.yml
 ```
 
-Outputs:
-
-- `branch_b_theory_vs_training.png`
-  Theory vs measured observables.
-
-- `branch_b_training_loss.png`
-  Separate training-loss / convergence diagnostic plot.
-
-- `branch_b_theory_vs_training.npz`
-  Saved arrays for observables, times, and loss histories.
-
-The script is configured through the `ExperimentConfig` block at the top of `compare_branch_b_dynamics.py`.
-
-### 2. Run Repo-Aligned Branch-B Phase Sweeps
-
-Run:
+Then run a training job, for example:
 
 ```bash
-python fader_phase_diagrams_repo_linear.py
+python train.py \
+  --name lattice_demo \
+  --data_path data/lattice_EM/processed \
+  --seq_len 27 \
+  --alphabet_type lattice \
+  --attr binary \
+  --encoder_hidden_dims 50,20 \
+  --decoder_hidden_dims 50 \
+  --dis_hidden_dims 15,10,5 \
+  --n_lat_dis 1 \
+  --batch_size 64 \
+  --n_epochs 10 \
+  --cuda False
 ```
 
-This is the preferred Branch-B sweep script because it:
+Completed runs are written under `models/<name>/<random_id>/`.
 
-- uses repository `AutoEncoder` and `LatentDiscriminator`
-- uses `Trainer`
-- uses the repository lambda schedule
-- supports convergence diagnostics
-- is closer to the actual repository semantics than the standalone older script
+## Utilities and Legacy Files
 
-## Observable Definitions Used in the Research Pipeline
+- [`decoder_weights.py`](decoder_weights.py), [`scripts/full_dataset.py`](scripts/full_dataset.py), [`scripts/sample_sequences.py`](scripts/sample_sequences.py), [`scripts/sample_EM.py`](scripts/sample_EM.py), and [`scripts/print_enc_out.py`](scripts/print_enc_out.py) are checkpoint-inspection helpers.
+- [`plot_observables.py`](plot_observables.py) and [`plot_branch_b_results.py`](plot_branch_b_results.py) are plotting utilities for saved experiment outputs.
+- [`classifier.py`](classifier.py) and [`interpolate.py`](interpolate.py) are legacy image-domain scripts inherited from the original upstream project. They are not part of the main biological-sequence workflow.
 
-The Branch-B scripts track observables derived from the trained linear system:
+## Tests
 
-- `M`, `s`
-  Encoder alignment with the signal subspace and nuisance direction.
-
-- `N`, `a`
-  Decoder alignment with the signal subspace and nuisance direction.
-
-- `beta`, `rho`
-  Decoder bias projections onto signal / nuisance components.
-
-- `Q`, `T`, `u`, `t`, `B`, `m`
-  Bulk observables needed for the closed ODE.
-
-Common scalar summaries include:
-
-- `reconstruction_error`
-- `norm_M`, `norm_N`, `norm_s`, `norm_a`, ...
-- `M_tilde = ||M|| / sqrt(tr(Q))`
-- `N_tilde = ||N|| / sqrt(tr(Q))`
-
-These are computed through `src/branch_b_observables.py` and then reduced to plotting-friendly scalar histories inside the scripts.
-
-## Convergence Diagnostics
-
-For theory-facing scripts, the most reliable convergence proxy is usually held-out or full-dataset reconstruction error, not an arbitrary signed saddle objective.
-
-When diagnosing training:
-
-1. Track reconstruction loss across epochs.
-2. Track the latent-discriminator loss separately.
-3. Use a rolling-window stationarity criterion on the reconstruction curve.
-
-The repository-style discriminator strength is typically ramped by `lambda_schedule`, so you should expect early training and late training to live in different adversarial regimes.
-
-## Recommended Canonical Files
-
-If you want to treat part of the repository as the stable, canonical interface, keep these as the primary entrypoints:
-
-- `train.py`
-- `src/`
-- `fader_phase_diagrams_repo_linear.py`
-- `compare_branch_b_dynamics.py`
-
-Other scripts are better treated as auxiliary, plotting, or legacy research utilities.
-
-## Typical Commands
-
-### Standard Training
-
-```bash
-python train.py
-```
-
-### Theory Comparison on GPU
-
-```bash
-python compare_branch_b_dynamics.py --device cuda
-```
-
-### Repo-Linear Sweep
-
-```bash
-python fader_phase_diagrams_repo_linear.py
-```
-
-### Observable Plotting
-
-```bash
-python plot_observables.py
-```
-
-## Common Failure Modes
-
-### 1. Loss Curve Looks Wrong
-
-Likely causes:
-
-- plotting a signed adversarial objective instead of a true convergence proxy
-- mixing repository loss definitions with custom in-script losses
-- forgetting the adversarial lambda schedule
-- using too large an adversarial weight too early
-
-### 2. GPU Not Used
-
-Use:
-
-```bash
-python compare_branch_b_dynamics.py --device cuda
-```
-
-and make sure:
-
-- `torch.cuda.is_available()` is true
-- your PyTorch install has CUDA support
-
-### 3. Optimizer String Parsing Fails
-
-The repository optimizer parser expects plain decimal numeric strings, not scientific notation inside optimizer strings. If you build optimizer strings programmatically, format values explicitly.
-
-## References
-
-If you use this code, cite:
-
-[*Fader Networks: Manipulating Images by Sliding Attributes*](https://arxiv.org/pdf/1706.00409.pdf)  
-Guillaume Lample, Neil Zeghidour, Nicolas Usunier, Antoine Bordes, Ludovic Denoyer, Marc'Aurelio Ranzato
-
-```bibtex
-@inproceedings{lample2017fader,
-  title={Fader Networks: Manipulating Images by Sliding Attributes},
-  author={Lample, Guillaume and Zeghidour, Neil and Usunier, Nicolas and Bordes, Antoine and Denoyer, Ludovic and Ranzato, Marc'Aurelio},
-  booktitle={Advances in Neural Information Processing Systems},
-  year={2017}
-}
-```
-
-Contact: `jacopo.boccato@ipht.fr`
+The repository includes lightweight smoke tests under [`tests/`](tests). They validate model construction, training-step execution, and sequence loading behavior rather than providing a full regression suite.

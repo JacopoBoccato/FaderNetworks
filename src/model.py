@@ -145,13 +145,15 @@ def get_attr_loss(output, attributes, flip, params):
             output = output.unsqueeze(1)
         if attributes.dim() == 1:
             attributes = attributes.unsqueeze(1)
-        if flip:
-            # avoid using groundtruth for adversarial latent loss in regression mode
-            noise = torch.randn_like(attributes) * getattr(params, 'label_noise', 0.1)
-            if attributes.is_cuda:
-                noise = noise.cuda()
-            attributes = attributes + noise
-        return F.mse_loss(output, attributes, reduction='mean')
+
+        mse = F.mse_loss(output, attributes, reduction='mean')
+
+        # In the original Fader game, the autoencoder is trained against the
+        # classifier objective while the classifier itself is trained to predict
+        # the true attribute. For continuous labels there is no categorical
+        # "1 - y" target, so the faithful analogue is to reverse the sign of the
+        # regression objective on the AE side.
+        return -mse if flip else mse
 
     # existing categorical version (binary + multiclass)
     k = 0
