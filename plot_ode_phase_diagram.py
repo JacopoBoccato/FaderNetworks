@@ -79,7 +79,6 @@ DEFAULT_PHASE_COLORS = {
     "unclassified": "#7f8c8d",
 }
 CLASSIFIER_THRESHOLDS = {
-    "loss_small": 1.0,
     "small": 0.05,
     "active": 0.05,
     "rho": 0.1,
@@ -118,7 +117,6 @@ SCRIPT_SWEEP_DEFAULTS = {
 }
 
 SCRIPT_CLASSIFIER_THRESHOLDS = {
-    "loss_small_thresh": CLASSIFIER_THRESHOLDS["loss_small"],
     "small_thresh": CLASSIFIER_THRESHOLDS["small"],
     "active_thresh": CLASSIFIER_THRESHOLDS["active"],
     "rho_thresh": CLASSIFIER_THRESHOLDS["rho"],
@@ -155,14 +153,12 @@ def build_ode_params(config: ODEPhaseConfig) -> Dict[str, Any]:
 def classify_phase(cell_metrics: Dict[str, float], source: str) -> str:
     _ = source
 
-    rec = float(cell_metrics["reconstruction_error"])
     norm_s = float(cell_metrics["norm_s"])
     norm_a = float(cell_metrics["norm_a"])
     norm_c = float(cell_metrics["norm_C"])
     rho = float(cell_metrics["rho"])
     norm_b = float(np.sqrt(max(cell_metrics["m"], 0.0)))
 
-    loss_small = rec <= CLASSIFIER_THRESHOLDS["loss_small"]
     s_small = norm_s <= CLASSIFIER_THRESHOLDS["small"]
     a_small = norm_a <= CLASSIFIER_THRESHOLDS["small"]
     b_small = norm_b <= CLASSIFIER_THRESHOLDS["small"]
@@ -171,10 +167,10 @@ def classify_phase(cell_metrics: Dict[str, float], source: str) -> str:
     c_active = norm_c >= CLASSIFIER_THRESHOLDS["active"]
     rho_active = rho >= CLASSIFIER_THRESHOLDS["rho"]
 
-    if loss_small and rho_active and s_small:
+    if rho_active and s_small:
         return "disentangled_learning"
 
-    if loss_small and s_active and a_active and c_active:
+    if s_active and a_active and c_active:
         return "entangled_learning"
 
     if s_small and a_small and b_small:
@@ -271,7 +267,6 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tau_max", type=float, default=SCRIPT_SWEEP_DEFAULTS["tau_max"], help="Final ODE integration time.")
     parser.add_argument("--out", type=str, default=SCRIPT_SWEEP_DEFAULTS["out"])
     parser.add_argument("--out_data", type=str, default=SCRIPT_SWEEP_DEFAULTS["out_data"], help="Optional `.npz` path for final theory metrics and phases.")
-    parser.add_argument("--loss_small_thresh", type=float, default=SCRIPT_CLASSIFIER_THRESHOLDS["loss_small_thresh"])
     parser.add_argument("--small_thresh", type=float, default=SCRIPT_CLASSIFIER_THRESHOLDS["small_thresh"])
     parser.add_argument("--active_thresh", type=float, default=SCRIPT_CLASSIFIER_THRESHOLDS["active_thresh"])
     parser.add_argument("--rho_thresh", type=float, default=SCRIPT_CLASSIFIER_THRESHOLDS["rho_thresh"])
@@ -442,7 +437,6 @@ def main() -> None:
     parser = build_argument_parser()
     args = parser.parse_args()
 
-    CLASSIFIER_THRESHOLDS["loss_small"] = float(args.loss_small_thresh)
     CLASSIFIER_THRESHOLDS["small"] = float(args.small_thresh)
     CLASSIFIER_THRESHOLDS["active"] = float(args.active_thresh)
     CLASSIFIER_THRESHOLDS["rho"] = float(args.rho_thresh)
