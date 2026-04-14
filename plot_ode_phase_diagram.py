@@ -15,7 +15,7 @@ This script mirrors the existing grid-sweep interface from
 import argparse
 import os
 from dataclasses import fields, replace
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
@@ -39,20 +39,31 @@ from phase_diagram import (
     observables_to_state,
     scalarize_state,
 )
-from plot_phase_diagram_from_npz import (
-    BG,
-    CLASSIFIER_THRESHOLDS,
-    DEFAULT_PHASE_COLORS,
-    GRID,
-    PANEL,
-    classify_phase,
-    ordered_phases,
-    phase_to_int,
-)
 
 
 CONFIG_FIELDS = {field.name: field.type for field in fields(ExperimentConfig)}
 DEFAULT_CONFIG = ExperimentConfig()
+BG = "#1a1a2e"
+PANEL = "#0f0f23"
+GRID = "#2a2a4a"
+DEFAULT_PHASES = (
+    "entangled_learning",
+    "label_loss",
+    "disentangled_learning",
+    "unclassified",
+)
+DEFAULT_PHASE_COLORS = {
+    "entangled_learning": "#3498db",
+    "label_loss": "#e74c3c",
+    "disentangled_learning": "#2ecc71",
+    "unclassified": "#7f8c8d",
+}
+CLASSIFIER_THRESHOLDS = {
+    "loss_small": 1.0,
+    "small": 0.05,
+    "active": 0.05,
+    "rho": 0.1,
+}
 FINAL_METRIC_NAMES: Tuple[str, ...] = (
     "norm_M",
     "norm_s",
@@ -121,6 +132,58 @@ SCRIPT_EXPERIMENT_DEFAULTS = replace(
 
 def format_default_value_list(values: Sequence[Any]) -> str:
     return ",".join(str(value) for value in values)
+
+
+def classify_phase(cell_metrics: Dict[str, float], source: str) -> str:
+    _ = source
+
+    rec = float(cell_metrics["reconstruction_error"])
+    norm_s = float(cell_metrics["norm_s"])
+    norm_a = float(cell_metrics["norm_a"])
+    norm_c = float(cell_metrics["norm_C"])
+    rho = float(cell_metrics["rho"])
+    norm_b = float(np.sqrt(max(cell_metrics["m"], 0.0)))
+
+    loss_small = rec <= CLASSIFIER_THRESHOLDS["loss_small"]
+    s_small = norm_s <= CLASSIFIER_THRESHOLDS["small"]
+    a_small = norm_a <= CLASSIFIER_THRESHOLDS["small"]
+    b_small = norm_b <= CLASSIFIER_THRESHOLDS["small"]
+    s_active = norm_s >= CLASSIFIER_THRESHOLDS["active"]
+    a_active = norm_a >= CLASSIFIER_THRESHOLDS["active"]
+    c_active = norm_c >= CLASSIFIER_THRESHOLDS["active"]
+    rho_active = rho >= CLASSIFIER_THRESHOLDS["rho"]
+
+    if loss_small and rho_active and s_small:
+        return "disentangled_learning"
+
+    if loss_small and s_active and a_active and c_active:
+        return "entangled_learning"
+
+    if s_small and a_small and b_small:
+        return "label_loss"
+
+    return "unclassified"
+
+
+def ordered_phases(*phase_grids: np.ndarray) -> List[str]:
+    seen: List[str] = []
+    for phase in DEFAULT_PHASES:
+        if phase not in seen:
+            seen.append(phase)
+    for grid in phase_grids:
+        for phase in grid.ravel():
+            phase_str = str(phase)
+            if phase_str not in seen:
+                seen.append(phase_str)
+    return seen
+
+
+def phase_to_int(phase_grid: np.ndarray, phases: List[str]) -> np.ndarray:
+    mapping = {phase: idx for idx, phase in enumerate(phases)}
+    out = np.zeros(phase_grid.shape, dtype=int)
+    for phase, idx in mapping.items():
+        out[phase_grid == phase] = idx
+    return out
 
 
 def parse_scalar_value(raw: str, field_name: str) -> Any:
