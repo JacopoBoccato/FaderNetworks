@@ -6,7 +6,7 @@ This script mirrors the existing grid-sweep interface from
 `fader_phase_diagrams_repo_linear.py`, but it:
 
 1. fixes all parameters through CLI flags,
-2. varies exactly two `ExperimentConfig` fields over a 2D grid,
+2. varies exactly two numeric ODE parameters over a 2D grid,
 3. builds the Branch-B initial observable state at each grid point, and
 4. integrates only the ODE before classifying the final theory state with the
    same phase rules used by `plot_phase_diagram_from_npz.py`.
@@ -14,7 +14,7 @@ This script mirrors the existing grid-sweep interface from
 
 import argparse
 import os
-from dataclasses import fields, replace
+from dataclasses import dataclass, fields, replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
@@ -28,21 +28,41 @@ import numpy as np
 import torch
 
 from phase_diagram import (
-    ExperimentConfig,
     N_DIM,
     R_DIM,
-    build_shared_params,
-    compute_measured_observables,
-    generate_dataset,
+    build_teacher,
+    extract_linear_matrices,
     integrate_theory,
     make_linear_fader,
     observables_to_state,
     scalarize_state,
 )
+from src.branch_b_observables import compute_branch_b_observables
 
 
-CONFIG_FIELDS = {field.name: field.type for field in fields(ExperimentConfig)}
-DEFAULT_CONFIG = ExperimentConfig()
+@dataclass(frozen=True)
+class ODEPhaseConfig:
+    noise_total: float = 0.5
+    lambda_reg: float = 0.5
+    lam_sig: float = 15.0
+    lambda_C: float = 0.1
+    alpha_C: float = 1.0
+    eta_clf: float = 1.0
+    gamma0: float = 0.0
+    gamma_mu: float = 0.0
+    h_scale: float = 0.2
+    theory_points: int = 1000
+    theory_solver: str = "Radau"
+    seed: int = 0
+    teacher_seed: int = 0
+    device: str = "cpu"
+
+
+CONFIG_FIELDS = {field.name: field.type for field in fields(ODEPhaseConfig)}
+SWEEPABLE_FIELDS = tuple(
+    field.name for field in fields(ODEPhaseConfig) if field.type in (int, float)
+)
+DEFAULT_CONFIG = ODEPhaseConfig()
 BG = "#1a1a2e"
 PANEL = "#0f0f23"
 GRID = "#2a2a4a"
@@ -104,34 +124,32 @@ SCRIPT_CLASSIFIER_THRESHOLDS = {
     "rho_thresh": CLASSIFIER_THRESHOLDS["rho"],
 }
 
-SCRIPT_EXPERIMENT_DEFAULTS = replace(
-    DEFAULT_CONFIG,
-    noise_total=0.5,
-    lambda_reg=0.5,
-    lam_sig=15.0,
-    lambda_C=0.1,
-    alpha_C=1.0,
-    eta_clf=1.0,
-    gamma0=0.0,
-    gamma_mu=0.0,
-    h_scale=0.2,
-    n_epochs=2000,
-    n_samples=5000,
-    batch_size=1000,
-    epoch_size=0,
-    learning_rate=5e-4,
-    measure_every_batches=1,
-    lambda_schedule=0,
-    theory_points=1000,
-    theory_solver="Radau",
-    seed=0,
-    teacher_seed=0,
-    device="cpu",
-)
+SCRIPT_EXPERIMENT_DEFAULTS = DEFAULT_CONFIG
 
 
 def format_default_value_list(values: Sequence[Any]) -> str:
     return ",".join(str(value) for value in values)
+
+
+def build_ode_params(config: ODEPhaseConfig) -> Dict[str, Any]:
+    eta = max(0.5 * float(config.noise_total), 1e-8)
+    g = max(0.5 * float(config.noise_total), 1e-8)
+    return {
+        "noise_total": float(config.noise_total),
+        "lambda_reg": float(config.lambda_reg),
+        "lam_sig": float(config.lam_sig),
+        "lambda_C": float(config.lambda_C),
+        "alpha_C": max(float(config.alpha_C), 0.0),
+        "eta_clf": max(float(config.eta_clf), 1e-8),
+        "gamma0": float(config.gamma0),
+        "gamma_mu": max(float(config.gamma_mu), 0.0),
+        "h_scale": float(config.h_scale),
+        "h_vec": float(config.h_scale) * np.array([0.5, 0.5, 0.0], dtype=float) / np.sqrt(0.5),
+        "theory_solver": str(config.theory_solver),
+        "ambient_dim": N_DIM,
+        "eta": eta,
+        "g": g,
+    }
 
 
 def classify_phase(cell_metrics: Dict[str, float], source: str) -> str:
@@ -230,8 +248,8 @@ def maybe_build_linspace(
 
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run an ODE-only Branch-B phase-diagram sweep.")
-    parser.add_argument("--vary_x", type=str, default=SCRIPT_SWEEP_DEFAULTS["vary_x"], choices=sorted(CONFIG_FIELDS))
-    parser.add_argument("--vary_y", type=str, default=SCRIPT_SWEEP_DEFAULTS["vary_y"], choices=sorted(CONFIG_FIELDS))
+    parser.add_argument("--vary_x", type=str, default=SCRIPT_SWEEP_DEFAULTS["vary_x"], choices=sorted(SWEEPABLE_FIELDS))
+    parser.add_argument("--vary_y", type=str, default=SCRIPT_SWEEP_DEFAULTS["vary_y"], choices=sorted(SWEEPABLE_FIELDS))
     parser.add_argument(
         "--x_values",
         type=str,
@@ -250,12 +268,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--x_max", type=float, default=None, help="Optional x-axis maximum if generating a numeric grid.")
     parser.add_argument("--y_min", type=float, default=None, help="Optional y-axis minimum if generating a numeric grid.")
     parser.add_argument("--y_max", type=float, default=None, help="Optional y-axis maximum if generating a numeric grid.")
-    parser.add_argument(
-        "--tau_max",
-        type=float,
-        default=SCRIPT_SWEEP_DEFAULTS["tau_max"],
-        help="Final ODE time. Set the script default to `None` to use the nominal training horizon n_epochs * learning_rate * batches_per_epoch.",
-    )
+    parser.add_argument("--tau_max", type=float, default=SCRIPT_SWEEP_DEFAULTS["tau_max"], help="Final ODE integration time.")
     parser.add_argument("--out", type=str, default=SCRIPT_SWEEP_DEFAULTS["out"])
     parser.add_argument("--out_data", type=str, default=SCRIPT_SWEEP_DEFAULTS["out_data"], help="Optional `.npz` path for final theory metrics and phases.")
     parser.add_argument("--loss_small_thresh", type=float, default=SCRIPT_CLASSIFIER_THRESHOLDS["loss_small_thresh"])
@@ -263,14 +276,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--active_thresh", type=float, default=SCRIPT_CLASSIFIER_THRESHOLDS["active_thresh"])
     parser.add_argument("--rho_thresh", type=float, default=SCRIPT_CLASSIFIER_THRESHOLDS["rho_thresh"])
 
-    for field in fields(ExperimentConfig):
+    for field in fields(ODEPhaseConfig):
         default = getattr(SCRIPT_EXPERIMENT_DEFAULTS, field.name)
         parser.add_argument(f"--{field.name}", type=type(default), default=default)
 
     return parser
 
 
-def build_configs_from_args(args: argparse.Namespace) -> Tuple[ExperimentConfig, str, str, Tuple[Any, ...], Tuple[Any, ...]]:
+def build_configs_from_args(args: argparse.Namespace) -> Tuple[ODEPhaseConfig, str, str, Tuple[Any, ...], Tuple[Any, ...]]:
     x_values = parse_value_list(args.x_values, args.vary_x) if args.x_values else maybe_build_linspace(args.vary_x, args.nx, args.x_min, args.x_max)
     y_values = parse_value_list(args.y_values, args.vary_y) if args.y_values else maybe_build_linspace(args.vary_y, args.ny, args.y_min, args.y_max)
     if x_values is None or y_values is None:
@@ -278,8 +291,8 @@ def build_configs_from_args(args: argparse.Namespace) -> Tuple[ExperimentConfig,
     if args.vary_x == args.vary_y:
         raise ValueError("`--vary_x` and `--vary_y` must be different config fields.")
 
-    base_kwargs = {field.name: getattr(args, field.name) for field in fields(ExperimentConfig)}
-    base_config = ExperimentConfig(**base_kwargs)
+    base_kwargs = {field.name: getattr(args, field.name) for field in fields(ODEPhaseConfig)}
+    base_config = ODEPhaseConfig(**base_kwargs)
     return base_config, args.vary_x, args.vary_y, tuple(x_values), tuple(y_values)
 
 
@@ -287,14 +300,6 @@ def ensure_parent_dir(path: str) -> None:
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
-
-
-def nominal_tau_max(config: ExperimentConfig) -> float:
-    n_samples = max(int(config.n_samples), 1)
-    batch_size = min(max(int(config.batch_size), 1), n_samples)
-    epoch_size = int(config.epoch_size) if int(config.epoch_size) > 0 else n_samples
-    batches_per_epoch = max(int(np.ceil(epoch_size / batch_size)), 1)
-    return float(config.n_epochs) * float(config.learning_rate) * float(batches_per_epoch)
 
 
 def cell_edges(values: Sequence[float]) -> np.ndarray:
@@ -310,30 +315,33 @@ def cell_edges(values: Sequence[float]) -> np.ndarray:
     return np.concatenate(([left], mids, [right]))
 
 
-def compute_initial_state(config: ExperimentConfig, device: torch.device) -> Tuple[Dict[str, Any], np.ndarray]:
+def compute_initial_state(config: ODEPhaseConfig, device: torch.device) -> Tuple[Dict[str, Any], np.ndarray]:
     np.random.seed(int(config.seed))
     torch.manual_seed(int(config.seed))
 
-    params = build_shared_params(config)
-    X, y, U, v, lam = generate_dataset(config, params, N_DIM, R_DIM)
+    params = build_ode_params(config)
+    U, v = build_teacher(N_DIM, R_DIM, config.h_scale, seed=config.teacher_seed)
     ae, lat_dis = make_linear_fader(device)
-    initial_obs, _ = compute_measured_observables(
-        ae,
-        lat_dis,
-        X,
-        y,
-        U,
-        v,
-        lam,
+    W, A, b, C = extract_linear_matrices(ae, lat_dis, device)
+    U_t = torch.tensor(U, dtype=torch.float32, device=device)
+    v_t = torch.tensor(v, dtype=torch.float32, device=device)
+    Lambda_t = torch.tensor(config.lam_sig * np.eye(R_DIM), dtype=torch.float32, device=device)
+    initial_obs = compute_branch_b_observables(
+        W,
+        A,
+        b,
+        C,
+        U_t,
+        v_t,
+        Lambda_t,
         params["eta"],
         params["g"],
-        device,
     )
     return params, observables_to_state(initial_obs)
 
 
 def run_single_grid_point(
-    config: ExperimentConfig,
+    config: ODEPhaseConfig,
     tau_max: float,
     device: torch.device,
 ) -> Tuple[Dict[str, float], str]:
@@ -440,7 +448,7 @@ def main() -> None:
     CLASSIFIER_THRESHOLDS["rho"] = float(args.rho_thresh)
 
     base_config, vary_x, vary_y, x_values, y_values = build_configs_from_args(args)
-    tau_max = float(args.tau_max) if args.tau_max is not None else nominal_tau_max(base_config)
+    tau_max = float(args.tau_max)
 
     if base_config.device == "cuda" and torch.cuda.is_available():
         device = torch.device("cuda")
