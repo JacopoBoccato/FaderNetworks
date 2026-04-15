@@ -287,6 +287,9 @@ def continuous_reconstruction_error(x_hat, x_true):
 def scalarize_state(state, params):
     M, s, N, a, beta, rho, C, Q, T, u, t, B, m = unpack_state(state)
     scale = q_scale(Q)
+    latent_label_coupling = float(abs(a @ s))
+    b_norm = float(np.sqrt(max(m, 0.0)))
+    b_perp_norm = float(np.sqrt(max(m - rho ** 2, 0.0)))
     return {
         "norm_M": float(np.linalg.norm(M, ord="fro")),
         "norm_s": float(np.linalg.norm(s)),
@@ -301,6 +304,9 @@ def scalarize_state(state, params):
         "norm_t": float(np.linalg.norm(t)),
         "norm_B": float(np.linalg.norm(B, ord="fro")),
         "m": float(m),
+        "b_norm": b_norm,
+        "b_perp_norm": b_perp_norm,
+        "latent_label_coupling": latent_label_coupling,
         "reconstruction_error": reconstruction_error(state, params),
         "M_tilde": float(np.linalg.norm(M, ord="fro") / scale),
         "N_tilde": float(np.linalg.norm(N, ord="fro") / scale),
@@ -310,20 +316,27 @@ def scalarize_state(state, params):
 def scalarize_observables(observables, rec_loss):
     Q = observables["Q"].detach().cpu().numpy()
     scale = q_scale(Q)
+    rho = float(observables["rho"].item())
+    m = float(observables["m"].item())
+    s = observables["s"]
+    a = observables["a"]
     return {
         "norm_M": float(torch.norm(observables["M"], p="fro").item()),
-        "norm_s": float(torch.norm(observables["s"]).item()),
+        "norm_s": float(torch.norm(s).item()),
         "norm_N": float(torch.norm(observables["N"], p="fro").item()),
-        "norm_a": float(torch.norm(observables["a"]).item()),
+        "norm_a": float(torch.norm(a).item()),
         "norm_beta": float(torch.norm(observables["beta"]).item()),
-        "rho": float(observables["rho"].item()),
+        "rho": rho,
         "norm_C": float(torch.norm(observables["C"]).item()),
         "norm_Q": float(torch.norm(observables["Q"], p="fro").item()),
         "norm_T": float(torch.norm(observables["T"], p="fro").item()),
         "norm_u": float(torch.norm(observables["u"]).item()),
         "norm_t": float(torch.norm(observables["t"]).item()),
         "norm_B": float(torch.norm(observables["B"], p="fro").item()),
-        "m": float(observables["m"].item()),
+        "m": m,
+        "b_norm": float(np.sqrt(max(m, 0.0))),
+        "b_perp_norm": float(np.sqrt(max(m - rho ** 2, 0.0))),
+        "latent_label_coupling": float(abs(torch.dot(a.reshape(-1), s.reshape(-1)).item())),
         "reconstruction_error": float(rec_loss),
         "M_tilde": float(torch.norm(observables["M"], p="fro").item() / scale),
         "N_tilde": float(torch.norm(observables["N"], p="fro").item() / scale),

@@ -27,6 +27,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+from phase_classifier import (
+    CLASSIFIER_CONFIG,
+    DEFAULT_PHASES,
+    DEFAULT_PHASE_COLORS,
+    build_phase_grid,
+)
 from phase_diagram import (
     N_DIM,
     R_DIM,
@@ -66,23 +72,6 @@ DEFAULT_CONFIG = ODEPhaseConfig()
 BG = "#1a1a2e"
 PANEL = "#0f0f23"
 GRID = "#2a2a4a"
-DEFAULT_PHASES = (
-    "entangled_learning",
-    "label_loss",
-    "disentangled_learning",
-    "unclassified",
-)
-DEFAULT_PHASE_COLORS = {
-    "entangled_learning": "#3498db",
-    "label_loss": "#e74c3c",
-    "disentangled_learning": "#2ecc71",
-    "unclassified": "#7f8c8d",
-}
-CLASSIFIER_THRESHOLDS = {
-    "small": 0.05,
-    "active": 0.05,
-    "rho": 0.1,
-}
 FINAL_METRIC_NAMES: Tuple[str, ...] = (
     "norm_M",
     "norm_s",
@@ -97,6 +86,9 @@ FINAL_METRIC_NAMES: Tuple[str, ...] = (
     "norm_t",
     "norm_B",
     "m",
+    "b_norm",
+    "b_perp_norm",
+    "latent_label_coupling",
     "reconstruction_error",
     "M_tilde",
     "N_tilde",
@@ -117,9 +109,11 @@ SCRIPT_SWEEP_DEFAULTS = {
 }
 
 SCRIPT_CLASSIFIER_THRESHOLDS = {
-    "small_thresh": CLASSIFIER_THRESHOLDS["small"],
-    "active_thresh": CLASSIFIER_THRESHOLDS["active"],
-    "rho_thresh": CLASSIFIER_THRESHOLDS["rho"],
+    "signal_floor_abs": CLASSIFIER_CONFIG["signal_floor_abs"],
+    "signal_floor_rel": CLASSIFIER_CONFIG["signal_floor_rel"],
+    "label_floor_abs": CLASSIFIER_CONFIG["label_floor_abs"],
+    "label_floor_rel": CLASSIFIER_CONFIG["label_floor_rel"],
+    "dominance_high": CLASSIFIER_CONFIG["dominance_high"],
 }
 
 SCRIPT_EXPERIMENT_DEFAULTS = DEFAULT_CONFIG
@@ -148,35 +142,6 @@ def build_ode_params(config: ODEPhaseConfig) -> Dict[str, Any]:
         "eta": eta,
         "g": g,
     }
-
-
-def classify_phase(cell_metrics: Dict[str, float], source: str) -> str:
-    _ = source
-
-    norm_s = float(cell_metrics["norm_s"])
-    norm_a = float(cell_metrics["norm_a"])
-    norm_c = float(cell_metrics["norm_C"])
-    rho = float(cell_metrics["rho"])
-    norm_b = float(np.sqrt(max(cell_metrics["m"], 0.0)))
-
-    s_small = norm_s <= CLASSIFIER_THRESHOLDS["small"]
-    a_small = norm_a <= CLASSIFIER_THRESHOLDS["small"]
-    b_small = norm_b <= CLASSIFIER_THRESHOLDS["small"]
-    s_active = norm_s >= CLASSIFIER_THRESHOLDS["active"]
-    a_active = norm_a >= CLASSIFIER_THRESHOLDS["active"]
-    c_active = norm_c >= CLASSIFIER_THRESHOLDS["active"]
-    rho_active = rho >= CLASSIFIER_THRESHOLDS["rho"]
-
-    if rho_active and s_small:
-        return "disentangled_learning"
-
-    if s_active and a_active and c_active:
-        return "entangled_learning"
-
-    if s_small and a_small and b_small:
-        return "label_loss"
-
-    return "unclassified"
 
 
 def ordered_phases(*phase_grids: np.ndarray) -> List[str]:
@@ -267,9 +232,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tau_max", type=float, default=SCRIPT_SWEEP_DEFAULTS["tau_max"], help="Final ODE integration time.")
     parser.add_argument("--out", type=str, default=SCRIPT_SWEEP_DEFAULTS["out"])
     parser.add_argument("--out_data", type=str, default=SCRIPT_SWEEP_DEFAULTS["out_data"], help="Optional `.npz` path for final theory metrics and phases.")
-    parser.add_argument("--small_thresh", type=float, default=SCRIPT_CLASSIFIER_THRESHOLDS["small_thresh"])
-    parser.add_argument("--active_thresh", type=float, default=SCRIPT_CLASSIFIER_THRESHOLDS["active_thresh"])
-    parser.add_argument("--rho_thresh", type=float, default=SCRIPT_CLASSIFIER_THRESHOLDS["rho_thresh"])
+    parser.add_argument("--signal_floor_abs", type=float, default=SCRIPT_CLASSIFIER_THRESHOLDS["signal_floor_abs"])
+    parser.add_argument("--signal_floor_rel", type=float, default=SCRIPT_CLASSIFIER_THRESHOLDS["signal_floor_rel"])
+    parser.add_argument("--label_floor_abs", type=float, default=SCRIPT_CLASSIFIER_THRESHOLDS["label_floor_abs"])
+    parser.add_argument("--label_floor_rel", type=float, default=SCRIPT_CLASSIFIER_THRESHOLDS["label_floor_rel"])
+    parser.add_argument("--dominance_high", type=float, default=SCRIPT_CLASSIFIER_THRESHOLDS["dominance_high"])
 
     for field in fields(ODEPhaseConfig):
         default = getattr(SCRIPT_EXPERIMENT_DEFAULTS, field.name)
@@ -339,7 +306,7 @@ def run_single_grid_point(
     config: ODEPhaseConfig,
     tau_max: float,
     device: torch.device,
-) -> Tuple[Dict[str, float], str]:
+) -> Dict[str, float]:
     params, x0 = compute_initial_state(config, device)
 
     if tau_max <= 0.0:
@@ -349,8 +316,7 @@ def run_single_grid_point(
         theory_states = integrate_theory(x0, params, t_eval)
         final_metrics = scalarize_state(theory_states[-1], params)
 
-    phase = classify_phase(final_metrics, source="theory")
-    return final_metrics, phase
+    return final_metrics
 
 
 def plot_ode_phase_diagram(
@@ -437,9 +403,11 @@ def main() -> None:
     parser = build_argument_parser()
     args = parser.parse_args()
 
-    CLASSIFIER_THRESHOLDS["small"] = float(args.small_thresh)
-    CLASSIFIER_THRESHOLDS["active"] = float(args.active_thresh)
-    CLASSIFIER_THRESHOLDS["rho"] = float(args.rho_thresh)
+    CLASSIFIER_CONFIG["signal_floor_abs"] = float(args.signal_floor_abs)
+    CLASSIFIER_CONFIG["signal_floor_rel"] = float(args.signal_floor_rel)
+    CLASSIFIER_CONFIG["label_floor_abs"] = float(args.label_floor_abs)
+    CLASSIFIER_CONFIG["label_floor_rel"] = float(args.label_floor_rel)
+    CLASSIFIER_CONFIG["dominance_high"] = float(args.dominance_high)
 
     base_config, vary_x, vary_y, x_values, y_values = build_configs_from_args(args)
     tau_max = float(args.tau_max)
@@ -465,15 +433,15 @@ def main() -> None:
             counter += 1
             config = replace(base_config, **{vary_x: x_value, vary_y: y_value})
             print(f"[{counter}/{total}] {vary_x}={x_value}, {vary_y}={y_value}, tau_max={tau_max:.6g}")
-            final_metrics, final_phase = run_single_grid_point(config, tau_max, device)
-            phase_grid[ix, iy] = final_phase
+            final_metrics = run_single_grid_point(config, tau_max, device)
             for metric_name in FINAL_METRIC_NAMES:
                 metric_grids[metric_name][ix, iy] = float(final_metrics[metric_name])
             print(
-                f"  phase={final_phase} "
                 f"rec={final_metrics['reconstruction_error']:.6g} "
                 f"rho={final_metrics['rho']:.6g}"
             )
+
+    phase_grid = build_phase_grid(metric_grids, source="theory")
 
     ensure_parent_dir(args.out)
     plot_ode_phase_diagram(x_values, y_values, phase_grid, vary_x, vary_y, args.out)
