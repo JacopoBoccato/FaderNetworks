@@ -48,6 +48,7 @@ class ExperimentConfig:
     lambda_reg: float = 0.5
     lam_sig: float = 15.0
     lambda_C: float = 0.1
+    alpha_AE: float = 1.0
     alpha_C: int = 1
     eta_clf: float = 50.0
     h_scale: float = 1.0
@@ -91,6 +92,7 @@ def build_shared_params(config):
         "lambda_reg": config.lambda_reg,
         "lam_sig": config.lam_sig,
         "lambda_C": config.lambda_C,
+        "alpha_AE": max(float(config.alpha_AE), 0.0),
         "alpha_C": max(float(config.alpha_C), 0.0),
         "eta_clf": max(config.eta_clf, 1e-8),
         "h_scale": config.h_scale,
@@ -324,6 +326,7 @@ def rhs(tau, X, params):
     lA = params["lambda_reg"]
     lb = params["lambda_reg"]
     lC = params["lambda_C"]
+    alpha_AE = float(params.get("alpha_AE", 1.0))
     alpha_C = params["alpha_C"]
     eta_clf = params["eta_clf"]
     h = params["h_vec"]
@@ -342,46 +345,50 @@ def rhs(tau, X, params):
     aux = T @ S - G + g * np.outer(u, s)
 
     dM = (
-        -2 * (T @ M @ D - N.T @ D + g * np.outer(T @ s - a + u, h))
-        + 2 * eta_clf * (CCt @ (M @ D + g * np.outer(s, h)))
-        - 2 * eta_clf * g * np.outer(C, h)
-        - 2 * lW * M
+        -2 * alpha_AE * (T @ M @ D - N.T @ D + g * np.outer(T @ s - a + u, h))
+        + 2 * alpha_AE * eta_clf * (CCt @ (M @ D + g * np.outer(s, h)))
+        - 2 * alpha_AE * eta_clf * g * np.outer(C, h)
+        - 2 * alpha_AE * lW * M
     )
     ds = (
-        -2 * ((T @ M - N.T) @ (Lambda @ h) + kappa * (T @ s) - kappa * a + g * u)
-        + 2 * eta_clf * (CCt @ (M @ (Lambda @ h) + kappa * s))
-        - 2 * eta_clf * g * C
-        - 2 * lW * s
+        -2 * alpha_AE * ((T @ M - N.T) @ (Lambda @ h) + kappa * (T @ s) - kappa * a + g * u)
+        + 2 * alpha_AE * eta_clf * (CCt @ (M @ (Lambda @ h) + kappa * s))
+        - 2 * alpha_AE * eta_clf * g * C
+        - 2 * alpha_AE * lW * s
     )
-    dN = -2 * (N @ S - D @ M.T + g * np.outer(beta - h, s)) - 2 * lA * N
-    da = -2 * (S @ a - M @ (Lambda @ h) - kappa * s + g * rho * s) - 2 * lA * a
-    dbeta = -2 * g * (N @ s - h + beta) - 2 * lb * beta
-    drho = -2 * g * (a @ s - 1.0 + rho) - 2 * lb * rho
+    dN = -2 * alpha_AE * (N @ S - D @ M.T + g * np.outer(beta - h, s)) - 2 * alpha_AE * lA * N
+    da = -2 * alpha_AE * (S @ a - M @ (Lambda @ h) - kappa * s + g * rho * s) - 2 * alpha_AE * lA * a
+    dbeta = -2 * alpha_AE * g * (N @ s - h + beta) - 2 * alpha_AE * lb * beta
+    drho = -2 * alpha_AE * g * (a @ s - 1.0 + rho) - 2 * alpha_AE * lb * rho
     dC = -2 * alpha_C * (eta_clf * (S @ C - g * s) + lC * C)
     dQ = (
-        -2 * aux
-        - 2 * aux.T
-        + 2 * eta_clf * (CCt @ S + S @ CCt)
-        - 2 * eta_clf * g * (np.outer(C, s) + np.outer(s, C))
-        - 4 * lW * Q
+        -2 * alpha_AE * aux
+        - 2 * alpha_AE * aux.T
+        + 2 * alpha_AE * eta_clf * (CCt @ S + S @ CCt)
+        - 2 * alpha_AE * eta_clf * g * (np.outer(C, s) + np.outer(s, C))
+        - 4 * alpha_AE * lW * Q
     )
-    dT = -2 * aux - 2 * aux.T - 4 * lA * T
-    du = -2 * (S @ u - H + g * m * s) - 2 * g * (T @ s - a + u) - 2 * (lA + lb) * u
+    dT = -2 * alpha_AE * aux - 2 * alpha_AE * aux.T - 4 * alpha_AE * lA * T
+    du = (
+        -2 * alpha_AE * (S @ u - H + g * m * s)
+        - 2 * alpha_AE * g * (T @ s - a + u)
+        - 2 * alpha_AE * (lA + lb) * u
+    )
     dt_ = (
-        -2 * (T @ H - q + g * rho * u)
-        + 2 * eta_clf * (CCt @ H)
-        - 2 * eta_clf * g * rho * C
-        - 2 * g * (B.T @ s - s + t)
-        - 2 * (lW + lb) * t
+        -2 * alpha_AE * (T @ H - q + g * rho * u)
+        + 2 * alpha_AE * eta_clf * (CCt @ H)
+        - 2 * alpha_AE * eta_clf * g * rho * C
+        - 2 * alpha_AE * g * (B.T @ s - s + t)
+        - 2 * alpha_AE * (lW + lb) * t
     )
     dB = (
-        -2 * (S @ B - S + g * np.outer(s, t))
-        - 2 * (G @ T - J + g * np.outer(a, u))
-        + 2 * eta_clf * (G @ CCt)
-        - 2 * eta_clf * g * np.outer(a, C)
-        - 2 * (lA + lW) * B
+        -2 * alpha_AE * (S @ B - S + g * np.outer(s, t))
+        - 2 * alpha_AE * (G @ T - J + g * np.outer(a, u))
+        + 2 * alpha_AE * eta_clf * (G @ CCt)
+        - 2 * alpha_AE * eta_clf * g * np.outer(a, C)
+        - 2 * alpha_AE * (lA + lW) * B
     )
-    dm = -4 * g * (u @ s - rho + m) - 4 * lb * m
+    dm = -4 * alpha_AE * g * (u @ s - rho + m) - 4 * alpha_AE * lb * m
     return pack_state(dM, ds, dN, da, dbeta, drho, dC, dQ, dT, du, dt_, dB, dm)
 
 
@@ -662,6 +669,7 @@ def parse_config():
     parser.add_argument("--lambda_reg", type=float, default=base.lambda_reg)
     parser.add_argument("--lam_sig", type=float, default=base.lam_sig)
     parser.add_argument("--lambda_C", type=float, default=base.lambda_C)
+    parser.add_argument("--alpha_AE", type=float, default=base.alpha_AE)
     parser.add_argument("--alpha_C", type=int, default=base.alpha_C)
     parser.add_argument("--eta_clf", type=float, default=base.eta_clf)
     parser.add_argument("--h_scale", type=float, default=base.h_scale)
@@ -673,6 +681,7 @@ def parse_config():
         lambda_reg=args.lambda_reg,
         lam_sig=args.lam_sig,
         lambda_C=args.lambda_C,
+        alpha_AE=args.alpha_AE,
         alpha_C=args.alpha_C,
         eta_clf=args.eta_clf,
         h_scale=args.h_scale,
@@ -746,6 +755,7 @@ def main():
         lambda_reg=params["lambda_reg"],
         lam_sig=params["lam_sig"],
         lambda_C=params["lambda_C"],
+        alpha_AE=params["alpha_AE"],
         alpha_C=params["alpha_C"],
         eta_clf=params["eta_clf"],
         h_scale=params["h_scale"],

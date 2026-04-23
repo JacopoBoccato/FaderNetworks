@@ -481,7 +481,7 @@ def main() -> None:
         config_grids[field.name] = values.reshape(nx, ny)
 
     shared_param_grids: Dict[str, np.ndarray] = {}
-    scalar_param_names = ("noise_total", "lambda_reg", "lam_sig", "lambda_C", "alpha_C", "eta_clf", "gamma0", "gamma_mu", "h_scale", "ambient_dim")
+    scalar_param_names = ("noise_total", "lambda_reg", "lam_sig", "lambda_C", "alpha_AE", "alpha_C", "eta_clf", "gamma0", "gamma_mu", "h_scale", "ambient_dim")
     for name in scalar_param_names:
         values = np.asarray([item["params"][name] for item in flat_results], dtype=float)
         shared_param_grids[name] = values.reshape(nx, ny)

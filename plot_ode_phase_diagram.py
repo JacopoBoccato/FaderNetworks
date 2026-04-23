@@ -52,6 +52,7 @@ class ODEPhaseConfig:
     lambda_reg: float = 0.5
     lam_sig: float = 15.0
     lambda_C: float = 0.1
+    alpha_AE: float = 1.0
     alpha_C: float = 1.0
     eta_clf: float = 1.0
     gamma0: float = 0.0
@@ -131,6 +132,7 @@ def build_ode_params(config: ODEPhaseConfig) -> Dict[str, Any]:
         "lambda_reg": float(config.lambda_reg),
         "lam_sig": float(config.lam_sig),
         "lambda_C": float(config.lambda_C),
+        "alpha_AE": max(float(config.alpha_AE), 0.0),
         "alpha_C": max(float(config.alpha_C), 0.0),
         "eta_clf": max(float(config.eta_clf), 1e-8),
         "gamma0": float(config.gamma0),
